@@ -23,7 +23,7 @@ profiles:
         storage:
           size: 512Mi
   placement:
-    anywhere:
+    akash:
       pricing:
         claude-chat:
           denom: uact
