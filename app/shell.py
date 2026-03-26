@@ -1,7 +1,7 @@
 import os
 import asyncio
 import json
-import threading
+import ptyprocess
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -9,16 +9,15 @@ from fastapi import WebSocket
 
 
 class ShellSession:
-    """PTY shell session using ptyprocess."""
+    """PTY shell session. Uses asyncio event loop reader for non-blocking output."""
 
     def __init__(self, session_id: str, workspace_dir: Path):
         self.session_id = session_id
         self.workspace_dir = workspace_dir
-        self._proc = None
-        self._running = False
+        self._proc: Optional[ptyprocess.PtyProcess] = None
         self._output_queue: Optional[asyncio.Queue] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_added = False
 
     def start(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -29,55 +28,63 @@ class ShellSession:
         env["HOME"] = str(self.workspace_dir)
         env["PWD"] = str(self.workspace_dir)
         env["LANG"] = "en_US.UTF-8"
-        for key in ("ANTHROPIC_API_KEY", "BASIC_AUTH_PASSWORD", "APP_SECRET_KEY"):
-            env.pop(key, None)
+        env["LC_ALL"] = "en_US.UTF-8"
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("BASIC_AUTH_PASSWORD", None)
+        env.pop("APP_SECRET_KEY", None)
 
-        import ptyprocess
         self._proc = ptyprocess.PtyProcess.spawn(
             ["/bin/bash", "--login"],
             cwd=str(self.workspace_dir),
             env=env,
             dimensions=(24, 80),
         )
-        self._running = True
-        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader_thread.start()
 
-    def _read_loop(self):
-        while self._running and self._proc and self._proc.isalive():
+        # Register fd with event loop for non-blocking reads
+        self._loop.add_reader(self._proc.fd, self._on_readable)
+        self._reader_added = True
+
+    def _on_readable(self):
+        """Called by event loop when PTY fd has data."""
+        try:
+            data = self._proc.read(4096)
+            if data and self._output_queue is not None:
+                self._output_queue.put_nowait(data)
+        except EOFError:
+            self._remove_reader()
+        except Exception:
+            self._remove_reader()
+
+    def _remove_reader(self):
+        if self._reader_added and self._loop and self._proc:
             try:
-                data = self._proc.read(4096)
-                if data:
-                    asyncio.run_coroutine_threadsafe(
-                        self._output_queue.put(data), self._loop
-                    )
-            except EOFError:
-                break
+                self._loop.remove_reader(self._proc.fd)
             except Exception:
-                break
-        self._running = False
+                pass
+            self._reader_added = False
 
     def write(self, data: bytes):
-        if self._proc and self._running:
+        if self._proc and self.is_alive():
             try:
                 self._proc.write(data)
             except Exception:
                 pass
 
     def resize(self, rows: int, cols: int):
-        if self._proc and self._running:
+        if self._proc and self.is_alive():
             try:
                 self._proc.setwinsize(rows, cols)
             except Exception:
                 pass
 
     def inject_command(self, command: str):
+        """Inject a visible command line into the terminal."""
         if not command.endswith("\n"):
             command += "\n"
         self.write(command.encode("utf-8", errors="replace"))
 
     def stop(self):
-        self._running = False
+        self._remove_reader()
         if self._proc:
             try:
                 self._proc.terminate(force=True)
@@ -86,14 +93,14 @@ class ShellSession:
             self._proc = None
 
     def is_alive(self) -> bool:
-        if not self._running or self._proc is None:
+        if self._proc is None:
             return False
         try:
             return self._proc.isalive()
         except Exception:
             return False
 
-    async def get_output(self, timeout: float = 0.05) -> Optional[bytes]:
+    async def get_output(self, timeout: float = 0.1) -> Optional[bytes]:
         try:
             return await asyncio.wait_for(self._output_queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -115,16 +122,23 @@ class ShellManager:
             self._sessions[session_id] = session
         return session
 
-    def get_session(self, session_id: str) -> Optional[ShellSession]:
-        return self._sessions.get(session_id)
-
-    async def run_command_in_session(self, command: str, session_id: str = "default", timeout: float = 30.0) -> dict:
-        """Run command for Claude tool use. Injects into PTY for visibility, captures via subprocess."""
+    async def run_command_in_session(
+        self,
+        command: str,
+        session_id: str = "default",
+        timeout: float = 30.0,
+    ) -> dict:
+        """
+        Execute a command for Claude's tool use.
+        Shows the command in the user's terminal via PTY inject.
+        Captures output reliably via subprocess.
+        """
         session = self._sessions.get(session_id)
         if session and session.is_alive():
-            session.inject_command(f"\r\n# [Claude] {command}")
+            session.inject_command(f"# [Claude] {command}")
 
         try:
+            # Run without sudo - container is already root
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -151,21 +165,26 @@ class ShellManager:
         loop = asyncio.get_event_loop()
         session = self.get_or_create_session(session_id, loop)
 
+        # Send connected confirmation as text
         await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
 
         async def pump_output():
+            """Forward PTY output bytes to browser."""
             nonlocal session
             while True:
                 if not session.is_alive():
                     await asyncio.sleep(1)
-                    session = self.get_or_create_session(session_id, loop)
+                    try:
+                        session = self.get_or_create_session(session_id, loop)
+                    except Exception:
+                        pass
                     continue
-                data = await session.get_output(timeout=0.05)
+                data = await session.get_output(timeout=0.1)
                 if data:
                     try:
                         await websocket.send_bytes(data)
                     except Exception:
-                        break
+                        return
 
         output_task = asyncio.create_task(pump_output())
 
@@ -179,14 +198,17 @@ class ShellManager:
                 raw_text = msg.get("text")
 
                 if raw_bytes:
-                    try:
-                        obj = json.loads(raw_bytes.decode("utf-8"))
-                        if obj.get("type") == "resize":
-                            session.resize(int(obj["rows"]), int(obj["cols"]))
-                            continue
-                    except Exception:
-                        pass
+                    # Check if it's a JSON control message
+                    if raw_bytes[0:1] == b"{":
+                        try:
+                            obj = json.loads(raw_bytes.decode("utf-8"))
+                            if obj.get("type") == "resize":
+                                session.resize(int(obj["rows"]), int(obj["cols"]))
+                                continue
+                        except Exception:
+                            pass
                     session.write(raw_bytes)
+
                 elif raw_text:
                     try:
                         obj = json.loads(raw_text)
@@ -196,6 +218,7 @@ class ShellManager:
                     except Exception:
                         pass
                     session.write(raw_text.encode("utf-8"))
+
         except Exception:
             pass
         finally:
