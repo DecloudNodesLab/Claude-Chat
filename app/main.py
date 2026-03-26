@@ -1,12 +1,14 @@
 import os
 import json
 import uuid
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+from jinja2 import Environment as JinjaEnv
 
 from app.auth import basic_auth
 from app.chat import handle_chat_message
@@ -24,14 +26,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 templates = Jinja2Templates(directory="templates")
-
-def _get_index_html() -> str:
-    """Read index.html from workspace if exists, otherwise fall back to templates/."""
-    workspace_index = WORKSPACE_DIR / "index.html"
-    if workspace_index.exists():
-        return workspace_index.read_text(encoding="utf-8")
-    return (Path("templates") / "index.html").read_text(encoding="utf-8")
-
 storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
 
@@ -63,26 +57,18 @@ async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
     t = get_translations(locale)
     chats = storage.list_chats()
-
     workspace_index = WORKSPACE_DIR / "index.html"
     if workspace_index.exists():
-        # Serve directly from workspace — render Jinja2 manually
-        from jinja2 import Environment
         src = workspace_index.read_text(encoding="utf-8")
-        env = Environment(autoescape=False)
-        template = env.from_string(src)
-        html = template.render(
+        env = JinjaEnv(autoescape=False)
+        html = env.from_string(src).render(
             t=t, locale=locale, chats=chats,
             supported_locales=SUPPORTED_LOCALES,
         )
         return HTMLResponse(content=html)
-
     return templates.TemplateResponse("index.html", {
-        "request": request,
-        "t": t,
-        "locale": locale,
-        "chats": chats,
-        "supported_locales": SUPPORTED_LOCALES,
+        "request": request, "t": t, "locale": locale,
+        "chats": chats, "supported_locales": SUPPORTED_LOCALES,
     })
 
 
@@ -140,51 +126,46 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
     user_message = body.get("message", "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Empty message")
+
     messages = storage.load_chat(chat_id) or []
     messages.append({"role": "user", "content": user_message})
 
+    # Run Claude in background, stream SSE keep-alive pings to prevent proxy timeout
     async def generate():
-        import json as _json
-        done_event = asyncio.Event()
-        result_holder = {}
-        error_holder = {}
+        NL = "\n"
 
-        async def run_claude():
+        # Start Claude as a background task
+        claude_task = asyncio.create_task(
+            handle_chat_message(
+                messages=messages,
+                workspace_dir=WORKSPACE_DIR,
+                shell_manager=shell_manager,
+                chat_id=chat_id,
+            )
+        )
+
+        # Ping every 5 seconds while waiting
+        while not claude_task.done():
+            yield ": ping" + NL + NL
             try:
-                reply, tool_uses = await handle_chat_message(
-                    messages=messages,
-                    workspace_dir=WORKSPACE_DIR,
-                    shell_manager=shell_manager,
-                    chat_id=chat_id,
-                )
-                result_holder["reply"] = reply
-                result_holder["tool_uses"] = tool_uses
-            except Exception as e:
-                error_holder["error"] = str(e)
-            finally:
-                done_event.set()
-
-        asyncio.create_task(run_claude())
-
-        # Send keep-alive pings every 5s so proxy doesn't close the connection
-        while not done_event.is_set():
-            yield ": ping" + chr(10) + chr(10)
-            try:
-                await asyncio.wait_for(asyncio.shield(done_event.wait()), timeout=5.0)
+                await asyncio.wait_for(asyncio.shield(claude_task), timeout=5.0)
             except asyncio.TimeoutError:
                 pass
+            except Exception:
+                break
 
-        if "error" in error_holder:
-            payload = _json.dumps({"error": error_holder["error"]})
-            yield "data: " + payload + chr(10) + chr(10)
+        # Get result
+        try:
+            reply, tool_uses = claude_task.result()
+        except Exception as e:
+            payload = json.dumps({"error": str(e)})
+            yield "data: " + payload + NL + NL
             return
 
-        reply = result_holder["reply"]
-        tool_uses = result_holder["tool_uses"]
         messages.append({"role": "assistant", "content": reply})
         storage.save_chat(chat_id, messages)
-        payload = _json.dumps({"reply": reply, "tool_uses": tool_uses, "messages": messages})
-        yield "data: " + payload + chr(10) + chr(10)
+        payload = json.dumps({"reply": reply, "tool_uses": tool_uses, "messages": messages})
+        yield "data: " + payload + NL + NL
 
     return StreamingResponse(
         generate(),
