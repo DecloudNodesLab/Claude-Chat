@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{{ t.title }}</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -191,24 +194,22 @@
   #terminal { height: 100%; width: 100%; }
   .xterm { height: 100% !important; }
   .xterm-screen { cursor: text !important; }
-  .tmate-placeholder {
-    display: flex; align-items: center; justify-content: center;
-    height: 100%; color: var(--text3); font-size: 13px; font-family: var(--font-mono);
-    flex-direction: column; gap: 10px;
+  .shell-ssh-info {
+    display: flex; align-items: center; gap: 6px; margin-left: 8px;
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 8px; flex: 1; min-width: 0;
   }
-  .tmate-url-box {
-    background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 8px 14px; font-family: var(--font-mono); font-size: 12px; color: var(--accent);
-    word-break: break-all; text-align: center; max-width: 90%;
+  .shell-ssh-label { font-size: 11px; color: var(--text3); white-space: nowrap; }
+  .shell-ssh-cmd {
+    font-family: var(--font-mono); font-size: 11px; color: var(--accent);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
   }
-  .tmate-url-box a { color: var(--accent); text-decoration: none; }
-  .tmate-url-box a:hover { text-decoration: underline; }
-  .shell-ssh-link {
-    font-size: 11px; color: var(--text3); padding: 2px 8px;
-    border: 1px solid var(--border); border-radius: 4px; text-decoration: none;
-    transition: color 0.15s;
+  .shell-ssh-copy {
+    padding: 1px 7px; background: transparent; border: 1px solid var(--border);
+    border-radius: 3px; color: var(--text3); cursor: pointer; font-size: 11px;
+    transition: all 0.15s; white-space: nowrap;
   }
-  .shell-ssh-link:hover { color: var(--accent); }
+  .shell-ssh-copy:hover { border-color: var(--accent); color: var(--accent); }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -332,19 +333,18 @@
     <div class="shell-section" id="shellSection">
       <div class="shell-header">
         <div class="shell-title">{{ t.shell_section }}</div>
-        <div class="shell-status" id="shellStatus">...</div>
-        <a id="shellSshLink" class="shell-ssh-link" style="display:none" target="_blank"></a>
-        <button class="shell-reconnect-btn" onclick="refreshTmateUrl()">↻</button>
+        <div class="shell-status disconnected" id="shellStatus">{{ t.shell_connecting }}</div>
+        <div class="shell-ssh-info" id="shellSshInfo" style="display:none">
+          <span class="shell-ssh-label">SSH:</span>
+          <code class="shell-ssh-cmd" id="shellSshCmd"></code>
+          <button class="shell-ssh-copy" id="shellSshCopy" onclick="copySsh()">Copy</button>
+        </div>
+        <button class="shell-reconnect-btn" onclick="reconnectShell()">{{ t.reconnect }}</button>
       </div>
       <div class="shell-container" id="shellContainer">
-        <div class="tmate-placeholder" id="tmatePlaceholder">
-          <span id="tmatePlaceholderText">Подключение tmate...</span>
-        </div>
-        <iframe id="tmateFrame" src="" style="display:none;width:100%;height:100%;border:none;background:#000;"></iframe>
+        <div id="terminal"></div>
       </div>
     </div>
-  </div>
-</div>
 
 <script>
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -641,115 +641,217 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 140) + 'px';
 }
 
-// ─── Shell / tmate terminal ──────────────────────────────────────────────────
-let _tmateCheckInterval = null;
-
-function setTmateUrl(url, sshUrl) {
-  const placeholder = document.getElementById('tmatePlaceholder');
-  const frame = document.getElementById('tmateFrame');
-  const status = document.getElementById('shellStatus');
-  const sshLink = document.getElementById('shellSshLink');
-
-  if (!url) {
-    placeholder.style.display = 'flex';
-    frame.style.display = 'none';
-    frame.src = '';
-    status.textContent = 'Connecting...';
-    status.className = 'shell-status disconnected';
-    placeholder.innerHTML = '<span style="color:var(--text3)">⏳ Connecting tmate...</span><br><span style="font-size:11px;color:var(--text3)">Requires internet access to tmate.io</span>';
-    return;
-  }
-
-  status.textContent = 'tmate ready';
-  status.className = 'shell-status connected';
-  placeholder.style.display = 'none';
-  frame.style.display = 'block';
-  if (frame.src !== url) frame.src = url;
-
-  if (sshUrl) {
-    sshLink.style.display = 'inline';
-    sshLink.textContent = '📋 SSH';
-    sshLink.title = sshUrl;
-    sshLink.onclick = (e) => {
-      e.preventDefault();
-      navigator.clipboard.writeText(sshUrl).catch(() => {});
-      sshLink.textContent = '✓ Copied';
-      setTimeout(() => { sshLink.textContent = '📋 SSH'; }, 2000);
-    };
-  }
-}
-
-async function fetchTmateUrl() {
-  try {
-    const r = await fetch('/tmate-url');
-    const data = await r.json();
-    if (data.ready && data.url) {
-      setTmateUrl(data.url, data.ssh || null);
-      return true;
-    }
-  } catch(e) {}
-  return false;
-}
-
-async function refreshTmateUrl() {
-  setTmateUrl(null, null);
-  if (_tmateCheckInterval) clearInterval(_tmateCheckInterval);
-  const ok = await fetchTmateUrl();
-  if (!ok) {
-    _tmateCheckInterval = setInterval(async () => {
-      const done = await fetchTmateUrl();
-      if (done) clearInterval(_tmateCheckInterval);
-    }, 2000);
-  }
-}
+// ─── Shell / Terminal (xterm.js → WS → asyncssh → tmate ro) ─────────────────
+let term = null;
+let fitAddon = null;
+let shellWs = null;
+let _termDataDisposable = null;
+let _reconnectTimer = null;
+const shellSessionId = 'default';
 
 function initTerminal() {
-  const tmateUrl = '{{ tmate_url }}';
-  if (tmateUrl && tmateUrl !== 'None' && tmateUrl.startsWith('http')) {
-    setTmateUrl(tmateUrl, null);
-  } else {
-    setTmateUrl(null, null);
-    if (_tmateCheckInterval) clearInterval(_tmateCheckInterval);
-    _tmateCheckInterval = setInterval(async () => {
-      const done = await fetchTmateUrl();
-      if (done) clearInterval(_tmateCheckInterval);
-    }, 2000);
+  if (term) { try { term.dispose(); } catch(e) {} term = null; fitAddon = null; _termDataDisposable = null; }
+
+  term = new Terminal({
+    theme: {
+      background: '#0a0c12', foreground: '#e2e8f0', cursor: '#7c8dff',
+      selectionBackground: '#2d3250',
+      black: '#1e2130', brightBlack: '#64748b',
+      blue: '#7c8dff', brightBlue: '#a5b4fc',
+      green: '#4ade80', brightGreen: '#86efac',
+      red: '#f87171', brightRed: '#fca5a5',
+      yellow: '#fbbf24', brightYellow: '#fde68a',
+      cyan: '#22d3ee', brightCyan: '#67e8f9',
+      magenta: '#c084fc', brightMagenta: '#d8b4fe',
+      white: '#e2e8f0', brightWhite: '#f8fafc',
+    },
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
+    fontSize: 13, lineHeight: 1.4, cursorBlink: true,
+    scrollback: 5000, convertEol: false, allowProposedApi: true,
+  });
+
+  // FitAddon - handle different CDN export styles
+  let FitAddonClass = (typeof FitAddon !== 'undefined')
+    ? (FitAddon.FitAddon || (typeof FitAddon === 'function' ? FitAddon : null))
+    : null;
+  if (FitAddonClass) { fitAddon = new FitAddonClass(); term.loadAddon(fitAddon); }
+
+  const container = document.getElementById('terminal');
+  term.open(container);
+
+  // onData attached once here
+  _termDataDisposable = term.onData(data => {
+    if (shellWs && shellWs.readyState === WebSocket.OPEN) {
+      shellWs.send(new TextEncoder().encode(data));
+    }
+  });
+
+  container.addEventListener('click', () => term && term.focus());
+
+  requestAnimationFrame(() => {
+    if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
+    term.focus();
+    connectShell();
+  });
+
+  // Poll for SSH info to show in header
+  pollSshInfo();
+}
+
+function connectShell() {
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+  if (shellWs) {
+    shellWs.onclose = null;
+    try { shellWs.close(); } catch(e) {}
+    shellWs = null;
+  }
+
+  const statusEl = document.getElementById('shellStatus');
+  statusEl.textContent = T.shell_connecting;
+  statusEl.className = 'shell-status disconnected';
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  shellWs = new WebSocket(`${proto}//${location.host}/ws/shell/${shellSessionId}`);
+  shellWs.binaryType = 'arraybuffer';
+
+  shellWs.onopen = () => {
+    statusEl.textContent = T.shell_connected;
+    statusEl.className = 'shell-status connected';
+    sendResize();
+    if (term) term.focus();
+  };
+
+  shellWs.onmessage = (event) => {
+    if (!term) return;
+    if (event.data instanceof ArrayBuffer) {
+      const arr = new Uint8Array(event.data);
+      // Skip JSON control messages
+      if (arr.length > 0 && arr[0] === 123) {
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(arr));
+          if (msg.type === 'connected') return;
+          if (msg.type === 'error') {
+            term.writeln('\r\n\x1b[31m[Error] ' + msg.msg + '\x1b[0m\r\n');
+            return;
+          }
+        } catch(e) {}
+      }
+      term.write(arr);
+    } else if (typeof event.data === 'string') {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'connected') return;
+        if (msg.type === 'error') {
+          term.writeln('\r\n\x1b[31m[Error] ' + msg.msg + '\x1b[0m\r\n');
+          // Retry after 3s - tmate might still be starting
+          _reconnectTimer = setTimeout(connectShell, 3000);
+          return;
+        }
+      } catch(e) {}
+      term.write(event.data);
+    }
+  };
+
+  shellWs.onerror = () => {
+    statusEl.textContent = T.shell_disconnected;
+    statusEl.className = 'shell-status disconnected';
+  };
+
+  shellWs.onclose = () => {
+    statusEl.textContent = T.shell_disconnected;
+    statusEl.className = 'shell-status disconnected';
+    _reconnectTimer = setTimeout(connectShell, 3000);
+  };
+}
+
+function sendResize() {
+  if (shellWs && shellWs.readyState === WebSocket.OPEN && term) {
+    shellWs.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
   }
 }
+
+function reconnectShell() { connectShell(); }
+
+// Show SSH read-only string in the header bar
+async function pollSshInfo() {
+  try {
+    const r = await fetch('/tmate-status');
+    const data = await r.json();
+    if (data.ready && data.ssh_ro) {
+      showSshInfo(data.ssh_ro);
+      return;
+    }
+  } catch(e) {}
+  // Not ready yet - retry in 2s
+  setTimeout(pollSshInfo, 2000);
+}
+
+function showSshInfo(sshRo) {
+  const infoEl = document.getElementById('shellSshInfo');
+  const cmdEl  = document.getElementById('shellSshCmd');
+  if (infoEl && cmdEl) {
+    cmdEl.textContent = sshRo;
+    infoEl.style.display = 'flex';
+  }
+}
+
+function copySsh() {
+  const cmd = document.getElementById('shellSshCmd');
+  const btn = document.getElementById('shellSshCopy');
+  if (!cmd) return;
+  navigator.clipboard.writeText(cmd.textContent).then(() => {
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  }).catch(() => {
+    btn.textContent = '✗';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  });
+}
+
+// Show SSH info from server-side render (if already ready at page load)
+(function() {
+  const sshRo = '{{ ssh_ro }}';
+  if (sshRo && sshRo !== 'None' && sshRo.includes('@')) {
+    document.addEventListener('DOMContentLoaded', () => showSshInfo(sshRo));
+  }
+})();
 
 // ─── Resize handle ────────────────────────────────────────────────────────────
 function initResizeHandle() {
   const handle = document.getElementById('resizeHandle');
-  const shellSection = document.getElementById('shellSection');
+  const shell  = document.getElementById('shellSection');
   let startY = 0, startH = 0, dragging = false;
-
   handle.addEventListener('mousedown', (e) => {
-    dragging = true; startY = e.clientY; startH = shellSection.offsetHeight;
+    dragging = true; startY = e.clientY; startH = shell.offsetHeight;
     document.body.style.userSelect = 'none';
   });
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const newH = Math.max(150, Math.min(startH + (startY - e.clientY), window.innerHeight * 0.7));
-    shellSection.style.height = newH + 'px';
-    shellSection.style.maxHeight = 'none';
+    const h = Math.max(150, Math.min(startH + (startY - e.clientY), window.innerHeight * 0.7));
+    shell.style.height = h + 'px'; shell.style.maxHeight = 'none';
+    if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
+    sendResize();
   });
   document.addEventListener('mouseup', () => {
     if (dragging) { dragging = false; document.body.style.userSelect = ''; }
   });
 }
 
-// ─── Window resize ────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {});
+window.addEventListener('resize', () => {
+  if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
+  sendResize();
+});
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   const firstItem = document.querySelector('.chat-item');
-  if (firstItem) {
-    const chatId = firstItem.id.replace('chat-item-', '');
-    loadChat(chatId);
-  }
+  if (firstItem) loadChat(firstItem.id.replace('chat-item-', ''));
   initResizeHandle();
-  initTerminal();
+  function tryInit(n) {
+    if (typeof Terminal !== 'undefined') { initTerminal(); }
+    else if (n > 0) { setTimeout(() => tryInit(n - 1), 200); }
+  }
+  tryInit(20);
 });
 </script>
 </body>
