@@ -79,12 +79,50 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .message-role{font-weight:600;}
 .message-role.user{color:var(--accent);}
 .message-role.assistant{color:var(--success);}
-.message-body{padding:9px 12px;border-radius:var(--radius);line-height:1.6;font-size:13px;white-space:pre-wrap;word-break:break-word;}
+.message-body{padding:9px 12px;border-radius:var(--radius);line-height:1.7;font-size:13px;word-break:break-word;white-space:normal;}
 .message.user .message-body{background:#1e2d4a;border:1px solid rgba(124,141,255,.15);}
 .message.assistant .message-body{background:#1a1e2e;border:1px solid var(--border);}
-.message-body code{font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 4px;border-radius:3px;}
-.message-body pre{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:var(--radius);padding:9px;margin:5px 0;overflow-x:auto;font-family:var(--font-mono);font-size:11px;}
-.message-body pre code{background:none;padding:0;}
+/* Inline code */
+.message-body code{font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,.1);padding:2px 5px;border-radius:3px;color:#e2e8f0;}
+/* Code blocks */
+.message-body pre{position:relative;background:#0d1117;border:1px solid var(--border);border-radius:var(--radius);margin:8px 0;overflow:hidden;}
+.message-body pre code{display:block;padding:12px 14px;overflow-x:auto;font-family:var(--font-mono);font-size:12px;line-height:1.6;background:none;color:#e2e8f0;}
+.message-body .code-header{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:rgba(255,255,255,.05);border-bottom:1px solid var(--border);font-size:11px;color:var(--text3);}
+.message-body .copy-code-btn{padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--text3);cursor:pointer;font-size:10px;transition:all .15s;}
+.message-body .copy-code-btn:hover{border-color:var(--accent);color:var(--accent);}
+.message-body .copy-code-btn.copied{border-color:var(--success);color:var(--success);}
+/* Headings */
+.message-body h1,.message-body h2,.message-body h3,.message-body h4{font-weight:600;margin:12px 0 5px;line-height:1.3;}
+.message-body h1{font-size:18px;color:var(--text);}
+.message-body h2{font-size:15px;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:4px;}
+.message-body h3{font-size:13px;color:var(--text2);}
+.message-body h4{font-size:12px;color:var(--text2);}
+/* Paragraphs and lists */
+.message-body p{margin:6px 0;}
+.message-body p:first-child{margin-top:0;}
+.message-body p:last-child{margin-bottom:0;}
+.message-body ul,.message-body ol{margin:6px 0 6px 20px;padding:0;}
+.message-body li{margin:3px 0;line-height:1.6;}
+.message-body ul li{list-style:disc;}
+.message-body ol li{list-style:decimal;}
+.message-body li>ul,.message-body li>ol{margin:2px 0 2px 16px;}
+/* Blockquote */
+.message-body blockquote{margin:8px 0;padding:6px 12px;border-left:3px solid var(--accent2);background:rgba(124,141,255,.06);border-radius:0 4px 4px 0;color:var(--text2);}
+/* Links */
+.message-body a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(124,141,255,.3);transition:border-color .15s;}
+.message-body a:hover{border-bottom-color:var(--accent);}
+/* Tables */
+.message-body table{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px;}
+.message-body th,.message-body td{padding:6px 10px;border:1px solid var(--border);text-align:left;}
+.message-body th{background:rgba(255,255,255,.05);font-weight:600;color:var(--text2);}
+.message-body tr:nth-child(even) td{background:rgba(255,255,255,.02);}
+/* HR */
+.message-body hr{border:none;border-top:1px solid var(--border);margin:10px 0;}
+/* Bold / italic */
+.message-body strong{font-weight:600;color:var(--text);}
+.message-body em{font-style:italic;color:var(--text2);}
+/* Strikethrough */
+.message-body del{color:var(--text3);}
 .tool-indicator{display:inline-flex;align-items:center;gap:4px;margin-top:4px;padding:2px 7px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:4px;font-size:10px;color:var(--warning);font-family:var(--font-mono);}
 .thinking{display:flex;align-items:center;gap:8px;color:var(--text3);font-size:12px;padding:6px 0;}
 .dots{display:flex;gap:3px;}
