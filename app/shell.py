@@ -1,114 +1,129 @@
 import os
 import asyncio
 import json
-import subprocess
+import select
 import threading
-import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import WebSocket
 
 
-class TmateSession:
-    def __init__(self, workspace_dir: Path):
+class ShellSession:
+    def __init__(self, session_id: str, workspace_dir: Path):
+        self.session_id = session_id
         self.workspace_dir = workspace_dir
-        self.ssh_ro: Optional[str] = None
-        self.ssh_host: Optional[str] = None
-        self.ssh_user: Optional[str] = None
-        self._sock = "/tmp/tmate-claude.sock"
-        self._ready = False
+        self._proc = None
+        self._buf: list = []
+        self._buf_lock = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
 
-    def start(self) -> bool:
+    def start(self):
+        import ptyprocess
         env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
         env["HOME"] = "/root"
+        env["PWD"] = str(self.workspace_dir)
+        env["LANG"] = "en_US.UTF-8"
         for k in ("ANTHROPIC_API_KEY", "BASIC_AUTH_PASSWORD", "APP_SECRET_KEY"):
             env.pop(k, None)
 
-        # Kill old session silently
-        subprocess.run(["tmate", "-S", self._sock, "kill-session"],
-                       capture_output=True)
-        time.sleep(0.3)
-
-        # Start new detached session
-        subprocess.run(
-            ["tmate", "-S", self._sock, "new-session", "-d",
-             "-s", "main", "-x", "220", "-y", "50"],
-            env=env, cwd=str(self.workspace_dir),
-            capture_output=True,
+        self._proc = ptyprocess.PtyProcess.spawn(
+            ["/bin/bash", "--login"],
+            cwd=str(self.workspace_dir),
+            env=env,
+            dimensions=(24, 80),
         )
+        self._running = True
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
 
-        # Wait for SSH URL (up to 20 seconds)
-        print("[tmate] Waiting for SSH URL from tmate.io...", flush=True)
-        for attempt in range(40):
-            time.sleep(0.5)
-            r = subprocess.run(
-                ["tmate", "-S", self._sock, "display", "-p", "#{tmate_ssh_ro}"],
-                capture_output=True, text=True,
-            )
-            out = r.stdout.strip()
-            if out and "@" in out and "tmate.io" in out:
-                self.ssh_ro = out  # "ssh ro-TOKEN@lon1.tmate.io"
-                token_host = out.replace("ssh ", "").strip()
-                parts = token_host.split("@")
-                if len(parts) == 2:
-                    self.ssh_user = parts[0]
-                    self.ssh_host = parts[1]
-                self._ready = True
-                print(f"[tmate] ✓ SSH (read-only): {out}", flush=True)
+    def _reader(self):
+        fd = self._proc.fd
+        while self._running:
+            try:
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        break
+                    if chunk:
+                        with self._buf_lock:
+                            self._buf.append(chunk)
+            except (ValueError, OSError):
                 break
-            if attempt > 0 and attempt % 6 == 0:
-                print(f"[tmate] Still waiting... ({attempt}/40)", flush=True)
+        self._running = False
 
-        if not self._ready:
-            print("[tmate] ✗ No URL received — check internet to tmate.io port 22", flush=True)
-            return False
+    def drain(self) -> bytes:
+        with self._buf_lock:
+            if not self._buf:
+                return b""
+            out = b"".join(self._buf)
+            self._buf.clear()
+            return out
 
-        # cd to workspace
-        subprocess.run(
-            ["tmate", "-S", self._sock, "send-keys", "-t", "main",
-             f"cd {self.workspace_dir} && clear", "Enter"],
-            capture_output=True,
-        )
-        return True
+    def write(self, data: bytes):
+        if self._proc and self._running:
+            try:
+                self._proc.write(data)
+            except Exception:
+                pass
+
+    def resize(self, rows: int, cols: int):
+        if self._proc and self._running:
+            try:
+                self._proc.setwinsize(rows, cols)
+            except Exception:
+                pass
 
     def inject_command(self, command: str):
-        if self._ready:
-            subprocess.run(
-                ["tmate", "-S", self._sock, "send-keys", "-t", "main",
-                 command, "Enter"],
-                capture_output=True,
-            )
+        if not command.endswith("\n"):
+            command += "\n"
+        self.write(command.encode("utf-8", errors="replace"))
+
+    def stop(self):
+        self._running = False
+        if self._proc:
+            try:
+                self._proc.terminate(force=True)
+            except Exception:
+                pass
+            self._proc = None
 
     def is_alive(self) -> bool:
-        r = subprocess.run(["tmate", "-S", self._sock, "list-sessions"],
-                           capture_output=True)
-        return r.returncode == 0
+        if not self._running or self._proc is None:
+            return False
+        try:
+            return self._proc.isalive()
+        except Exception:
+            return False
 
 
 class ShellManager:
     def __init__(self, workspace_dir: Path):
         self.workspace_dir = workspace_dir
-        self._session: Optional[TmateSession] = None
-        self._lock = threading.Lock()
+        self._sessions: Dict[str, ShellSession] = {}
 
-    def get_or_create_session(self) -> TmateSession:
-        with self._lock:
-            if self._session is None or not self._session.is_alive():
-                s = TmateSession(self.workspace_dir)
-                s.start()
-                self._session = s
-            return self._session
+    def get_or_create_session(self, session_id: str = "default") -> ShellSession:
+        s = self._sessions.get(session_id)
+        if s is None or not s.is_alive():
+            if s:
+                s.stop()
+            s = ShellSession(session_id, self.workspace_dir)
+            s.start()
+            self._sessions[session_id] = s
+        return s
 
-    # Called by tools.py — session_id kept for API compat but ignored
     async def run_command_in_session(
         self,
         command: str,
         session_id: str = "default",
         timeout: float = 30.0,
     ) -> dict:
-        s = self._session
-        if s and s._ready:
+        s = self._sessions.get(session_id)
+        if s and s.is_alive():
             s.inject_command(f"# [Claude] {command}")
 
         try:
@@ -124,8 +139,7 @@ class ShellManager:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                return {"stdout": "", "stderr": f"Timed out after {int(timeout)}s",
-                        "returncode": -1}
+                return {"stdout": "", "stderr": f"Timed out after {int(timeout)}s", "returncode": -1}
             return {
                 "stdout": out.decode("utf-8", errors="replace")[:16000],
                 "stderr": err.decode("utf-8", errors="replace")[:4000],
@@ -135,93 +149,49 @@ class ShellManager:
             return {"stdout": "", "stderr": str(e), "returncode": -1}
 
     async def handle_websocket(self, websocket: WebSocket, session_id: str):
-        """Stream tmate read-only SSH session to browser via asyncssh."""
-        import asyncssh
+        session = self.get_or_create_session(session_id)
+        await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
 
-        # Wait up to 15s for tmate to be ready
-        for _ in range(30):
-            s = self._session
-            if s and s._ready and s.ssh_host:
-                break
-            await websocket.send_text(json.dumps({
-                "type": "info",
-                "msg": "Waiting for tmate session...",
-            }))
-            await asyncio.sleep(0.5)
-        else:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "msg": "tmate session not ready. Check container logs.",
-            }))
-            return
+        async def pump():
+            nonlocal session
+            while True:
+                await asyncio.sleep(0.02)
+                if not session.is_alive():
+                    await asyncio.sleep(1)
+                    session = self.get_or_create_session(session_id)
+                    continue
+                chunk = session.drain()
+                if chunk:
+                    try:
+                        await websocket.send_bytes(chunk)
+                    except Exception:
+                        return
 
-        s = self._session
-        await websocket.send_text(json.dumps({"type": "connected"}))
-
+        pump_task = asyncio.create_task(pump())
         try:
-            async with asyncssh.connect(
-                s.ssh_host,
-                port=22,
-                username=s.ssh_user,
-                known_hosts=None,
-                # tmate ro tokens use keyboard-interactive / none auth
-                client_keys=[],
-                password=None,
-                preferred_auth=("none", "keyboard-interactive", "password"),
-            ) as conn:
-
-                async with conn.create_process(
-                    request_pty=True,
-                    term_type="xterm-256color",
-                    term_size=(220, 50),
-                ) as proc:
-
-                    async def ws_to_ssh():
-                        while True:
-                            try:
-                                msg = await websocket.receive()
-                            except Exception:
-                                return
-                            if msg.get("type") == "websocket.disconnect":
-                                return
-                            raw = msg.get("bytes") or (
-                                msg.get("text", "").encode()
-                                if msg.get("text") else None
-                            )
-                            if not raw:
-                                continue
-                            if raw[0:1] == b"{":
-                                try:
-                                    obj = json.loads(raw)
-                                    if obj.get("type") == "resize":
-                                        proc.change_terminal_size(
-                                            int(obj["cols"]), int(obj["rows"])
-                                        )
-                                        continue
-                                except Exception:
-                                    pass
-                            # read-only session — input is ignored by tmate
-                            # but we still forward resize messages
-
-                    async def ssh_to_ws():
-                        try:
-                            while True:
-                                data = await proc.stdout.read(4096)
-                                if not data:
-                                    break
-                                if isinstance(data, str):
-                                    data = data.encode("utf-8", errors="replace")
-                                await websocket.send_bytes(data)
-                        except Exception:
-                            pass
-
-                    await asyncio.gather(ws_to_ssh(), ssh_to_ws())
-
-        except Exception as e:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                raw = msg.get("bytes") or (
+                    msg.get("text", "").encode() if msg.get("text") else None
+                )
+                if not raw:
+                    continue
+                if raw[0:1] == b"{":
+                    try:
+                        obj = json.loads(raw)
+                        if obj.get("type") == "resize":
+                            session.resize(int(obj["rows"]), int(obj["cols"]))
+                            continue
+                    except Exception:
+                        pass
+                session.write(raw)
+        except Exception:
+            pass
+        finally:
+            pump_task.cancel()
             try:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "msg": f"SSH error: {e}",
-                }))
-            except Exception:
+                await pump_task
+            except asyncio.CancelledError:
                 pass
