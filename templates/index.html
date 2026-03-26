@@ -94,12 +94,9 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .shell-btn:hover{border-color:var(--accent);color:var(--accent);}
 .shell-btn.copied{border-color:var(--success);color:var(--success);}
 /* Terminal viewport: scrollable div containing canvas */
-.term-viewport{flex:1;overflow-y:scroll;overflow-x:hidden;background:#0a0c12;position:relative;cursor:text;}
-.term-viewport::-webkit-scrollbar{width:8px;}
-.term-viewport::-webkit-scrollbar-track{background:#0a0c12;}
-.term-viewport::-webkit-scrollbar-thumb{background:#2d3250;border-radius:4px;}
-.term-viewport::-webkit-scrollbar-thumb:hover{background:#64748b;}
+.term-viewport{flex:1;overflow:hidden;background:#0a0c12;position:relative;cursor:text;}
 #termCanvas{display:block;}
+/* Custom scrollbar drawn on canvas - no CSS scroll needed */
 /* Selection overlay */
 .term-selection{position:absolute;background:rgba(124,141,255,0.3);pointer-events:none;}
 ::-webkit-scrollbar{width:6px;height:6px;}
@@ -371,7 +368,7 @@ const TERM = (() => {
   }
 
   function scrollToBottom(){
-    vp.scrollTop = vp.scrollHeight;
+    viewOffset = 0;
   }
 
   // Convert pixel coords to cell coords
@@ -417,12 +414,10 @@ const TERM = (() => {
 
   function onWheel(e){
     e.preventDefault();
-    const lines = e.deltaMode === 1 ? e.deltaY*3 : Math.round(e.deltaY / CHAR_H);
+    const lines = e.deltaMode === 1 ? e.deltaY*3 : Math.max(1, Math.round(Math.abs(e.deltaY) / CHAR_H)) * Math.sign(e.deltaY);
     const maxOffset = Math.max(0, scrollbuf.length - ROWS);
     viewOffset = Math.max(0, Math.min(maxOffset, viewOffset + lines));
-    // Sync scroll container
-    vp.scrollTop = (maxOffset - viewOffset) * CHAR_H;
-    render();
+    scheduleRender();
   }
 
   function getSelectedText(){
@@ -507,6 +502,7 @@ const TERM = (() => {
         ctx.fillText(cell.ch, cx*CHAR_W, cy*CHAR_H+CHAR_H-3);
       }
     }
+    drawScrollbar();
     updateScrollHeight();
   }
 
@@ -530,15 +526,28 @@ const TERM = (() => {
     }
   }
 
+  function drawScrollbar(){
+    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
+    if(maxOffset === 0) return; // no scrollbar needed
+    const sbW = 8;
+    const h = canvas.height;
+    // Track
+    ctx.fillStyle = '#1a1e2e';
+    ctx.fillRect(canvas.width - sbW, 0, sbW, h);
+    // Thumb
+    const ratio = ROWS / scrollbuf.length;
+    const thumbH = Math.max(20, h * ratio);
+    const thumbY = (1 - viewOffset / maxOffset) * (h - thumbH);
+    ctx.fillStyle = viewOffset > 0 ? '#7c8dff' : '#2d3250';
+    ctx.beginPath();
+    ctx.roundRect(canvas.width - sbW + 1, thumbY, sbW - 2, thumbH, 3);
+    ctx.fill();
+  }
+
   function updateScrollHeight(){
-    // Make canvas tall enough for scrollback
-    const totalH = scrollbuf.length * CHAR_H;
-    if(canvas.height !== totalH){
-      // Don't resize canvas (would clear it), instead manage vp scroll
-    }
-    // Keep vp scrolled to bottom if viewOffset==0
-    if(viewOffset===0){
-      vp.scrollTop = vp.scrollHeight;
+    // Scroll to bottom on new output
+    if(viewOffset === 0) {
+      // already at bottom, nothing to do
     }
   }
 
