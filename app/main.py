@@ -31,25 +31,21 @@ shell_manager = ShellManager(WORKSPACE_DIR)
 
 
 def _start_tmate_bg():
-    """Init tmate session in background so app starts fast."""
     print("[tmate] Starting session...", flush=True)
     try:
         s = shell_manager.get_or_create_session()
-        if s.web_url:
+        if s._ready and s.ssh_ro:
             print(f"[tmate] ✓ Session ready", flush=True)
-            print(f"[tmate] Web (read-only): {s.web_url}", flush=True)
-            if s.ssh_url:
-                print(f"[tmate] SSH (read-only): {s.ssh_url}", flush=True)
+            print(f"[tmate] SSH (read-only): {s.ssh_ro}", flush=True)
         else:
-            print("[tmate] ✗ Session started but no URL received (check internet access to tmate.io)", flush=True)
+            print("[tmate] ✗ No URL received. Check internet access to tmate.io", flush=True)
     except Exception as e:
-        print(f"[tmate] ✗ Init error: {e}", flush=True)
+        print(f"[tmate] ✗ Error: {e}", flush=True)
 
 
 @app.on_event("startup")
 async def startup():
-    t = threading.Thread(target=_start_tmate_bg, daemon=True)
-    t.start()
+    threading.Thread(target=_start_tmate_bg, daemon=True).start()
 
 
 def get_locale(request: Request) -> str:
@@ -74,12 +70,12 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/tmate-url")
-async def tmate_url(_=Depends(basic_auth)):
+@app.get("/tmate-status")
+async def tmate_status(_=Depends(basic_auth)):
     s = shell_manager._session
-    if s and s.web_url:
-        return {"url": s.web_url, "ssh": s.ssh_url, "ready": True}
-    return {"url": None, "ready": False}
+    if s and s._ready:
+        return {"ready": True, "ssh_ro": s.ssh_ro}
+    return {"ready": False, "ssh_ro": None}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -87,14 +83,15 @@ async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
     t = get_translations(locale)
     chats = storage.list_chats()
-    tmate_url = shell_manager.get_web_url()
+    s = shell_manager._session
+    ssh_ro = s.ssh_ro if (s and s._ready) else ""
     return templates.TemplateResponse("index.html", {
         "request": request,
         "t": t,
         "locale": locale,
         "chats": chats,
         "supported_locales": SUPPORTED_LOCALES,
-        "tmate_url": tmate_url or "",
+        "ssh_ro": ssh_ro,
     })
 
 
@@ -103,7 +100,7 @@ async def set_locale(locale: str, _=Depends(basic_auth)):
     if locale not in SUPPORTED_LOCALES:
         raise HTTPException(status_code=400, detail="Unsupported locale")
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("locale", locale, max_age=60*60*24*365)
+    resp.set_cookie("locale", locale, max_age=60 * 60 * 24 * 365)
     return resp
 
 
@@ -170,21 +167,14 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
 
 @app.websocket("/ws/shell/{session_id}")
 async def shell_ws(websocket: WebSocket, session_id: str):
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_") or "default"
     await websocket.accept()
     try:
-        # Send tmate URL to client
-        s = shell_manager._session
-        await websocket.send_text(json.dumps({
-            "type": "tmate",
-            "web_url": s.web_url if s else None,
-            "ssh_url": s.ssh_url if s else None,
-        }) if True else "{}")
-        while True:
-            await asyncio.sleep(10)
-            s = shell_manager._session
-            await websocket.send_text(json.dumps({
-                "type": "tmate",
-                "web_url": s.web_url if s else None,
-            }))
-    except Exception:
+        await shell_manager.handle_websocket(websocket, safe_id)
+    except WebSocketDisconnect:
         pass
+    except Exception:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
