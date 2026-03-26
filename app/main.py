@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from jinja2 import Environment as JinjaEnv
@@ -126,56 +126,20 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
     user_message = body.get("message", "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Empty message")
-
     messages = storage.load_chat(chat_id) or []
     messages.append({"role": "user", "content": user_message})
-
-    # Run Claude in background, stream SSE keep-alive pings to prevent proxy timeout
-    async def generate():
-        NL = "\n"
-
-        # Start Claude as a background task
-        claude_task = asyncio.create_task(
-            handle_chat_message(
-                messages=messages,
-                workspace_dir=WORKSPACE_DIR,
-                shell_manager=shell_manager,
-                chat_id=chat_id,
-            )
+    try:
+        reply, tool_uses = await handle_chat_message(
+            messages=messages,
+            workspace_dir=WORKSPACE_DIR,
+            shell_manager=shell_manager,
+            chat_id=chat_id,
         )
-
-        # Ping every 5 seconds while waiting
-        while not claude_task.done():
-            yield ": ping" + NL + NL
-            try:
-                await asyncio.wait_for(asyncio.shield(claude_task), timeout=5.0)
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                break
-
-        # Get result
-        try:
-            reply, tool_uses = claude_task.result()
-        except Exception as e:
-            payload = json.dumps({"error": str(e)})
-            yield "data: " + payload + NL + NL
-            return
-
-        messages.append({"role": "assistant", "content": reply})
-        storage.save_chat(chat_id, messages)
-        payload = json.dumps({"reply": reply, "tool_uses": tool_uses, "messages": messages})
-        yield "data: " + payload + NL + NL
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    messages.append({"role": "assistant", "content": reply})
+    storage.save_chat(chat_id, messages)
+    return {"reply": reply, "tool_uses": tool_uses, "messages": messages}
 
 
 @app.websocket("/ws/shell/{session_id}")
