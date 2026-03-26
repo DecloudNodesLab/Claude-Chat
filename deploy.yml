@@ -1,0 +1,35 @@
+---
+version: "2.0"
+services:
+  claude-chat:
+    image: 
+    env:
+      - ANTHROPIC_API_KEY=sk-ant-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      - MODEL=claude-sonnet-4-20250514
+      - MAX_TOKENS=1024
+    expose:
+      - port: 3000        
+        as: 80
+        to:
+          - global: true
+profiles:
+  compute:
+    claude-chat:
+      resources:
+        cpu:
+          units: 0.5 
+        memory:
+          size: 256Mi
+        storage:
+          size: 512Mi
+  placement:
+    anywhere:
+      pricing:
+        claude-chat:
+          denom: uact
+          amount: 10000
+deployment:
+  claude-chat:
+    anywhere:
+      profile: claude-chat
+      count: 1  
