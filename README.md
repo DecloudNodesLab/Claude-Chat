@@ -1,4 +1,4 @@
-# Claude Workspace
+# Claude Chat Workspace
 
 A self-hosted web interface for working with the Anthropic Claude API inside a Docker container.
 
@@ -81,9 +81,12 @@ The terminal at the bottom of the page is a full PTY bash terminal in the browse
 - Make sure the container is not started with `--read-only`
 - Check that `/dev/ptmx` is available (standard for Docker)
 
-## Support team
+# Support team
 
 **AKT** `akash1l7hk799vrug3fgkvu4fvww8zlnejrz9ck8mwgy`
+
 **USDT(trc-20)** `TWbMqmDqKPzRjy2JBZbCsunb9krymPBtjZ`
+
 **ETH** `0xD08C659fF3DD69DED970dF080D6427c057438868`
+
 **BTC** `bc1q0xk5rh5pasz9ecxpvwdr8empgvg54hv5su8533`
