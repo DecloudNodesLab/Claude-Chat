@@ -52,6 +52,19 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/style.css")
+async def serve_css():
+    """Serve style.css - no auth needed (page is already auth-protected)."""
+    from fastapi.responses import Response
+    workspace_css = WORKSPACE_DIR / "style.css"
+    if workspace_css.exists():
+        css = workspace_css.read_text(encoding="utf-8")
+    else:
+        fallback = Path("templates") / "style.css"
+        css = fallback.read_text(encoding="utf-8") if fallback.exists() else ""
+    return Response(content=css, media_type="text/css")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
