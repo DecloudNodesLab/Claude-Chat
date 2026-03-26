@@ -13,97 +13,91 @@ from fastapi import WebSocket
 class TmateSession:
     """
     Manages a tmate session.
-    - Starts tmate, reads the web read-only URL
-    - Provides inject_command via `tmate send-keys`
-    - Provides run_command for Claude tools via subprocess
+    Exposes SSH read-only URL for browser terminal via asyncssh.
     """
 
     def __init__(self, session_name: str, workspace_dir: Path):
         self.session_name = session_name
         self.workspace_dir = workspace_dir
         self.web_url: Optional[str] = None
-        self.ssh_url: Optional[str] = None
+        self.ssh_ro: Optional[str] = None   # full string: "ssh TOKEN@host"
+        self.ssh_host: Optional[str] = None
+        self.ssh_user: Optional[str] = None
+        self._sock: str = f"/tmp/tmate-{session_name}.sock"
         self._ready = False
-        self._proc: Optional[subprocess.Popen] = None
 
-    def start(self):
-        """Start tmate session and wait for URLs."""
+    def start(self) -> bool:
         env = os.environ.copy()
-        env["HOME"] = str(self.workspace_dir)
+        env["HOME"] = "/root"
         for k in ("ANTHROPIC_API_KEY", "BASIC_AUTH_PASSWORD", "APP_SECRET_KEY"):
             env.pop(k, None)
 
-        # Kill existing session if any
-        subprocess.run(
-            ["tmate", "-S", f"/tmp/tmate-{self.session_name}.sock", "kill-session"],
-            capture_output=True,
-        )
+        # Kill old session
+        subprocess.run(["tmate", "-S", self._sock, "kill-session"],
+                       capture_output=True)
         time.sleep(0.3)
 
-        sock = f"/tmp/tmate-{self.session_name}.sock"
-
-        # Start tmate with a named session
-        self._proc = subprocess.Popen(
-            ["tmate", "-S", sock, "new-session", "-d", "-s", self.session_name, "-x", "220", "-y", "50"],
-            env=env,
-            cwd=str(self.workspace_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        # Start new detached session
+        r = subprocess.run(
+            ["tmate", "-S", self._sock, "new-session", "-d",
+             "-s", self.session_name, "-x", "220", "-y", "50"],
+            env=env, cwd=str(self.workspace_dir),
+            capture_output=True,
         )
-        self._proc.wait()
 
-        # Wait for tmate to be ready and fetch URLs
-        print("[tmate] Waiting for URL from tmate.io...", flush=True)
-        for attempt in range(30):
+        # Wait for SSH URL
+        print("[tmate] Waiting for SSH URL from tmate.io...", flush=True)
+        for attempt in range(40):
             time.sleep(0.5)
             result = subprocess.run(
-                ["tmate", "-S", sock, "display", "-p",
-                 "#{tmate_web_ro} #{tmate_ssh_ro}"],
+                ["tmate", "-S", self._sock, "display", "-p",
+                 "#{tmate_ssh_ro}"],
                 capture_output=True, text=True,
             )
             out = result.stdout.strip()
-            if out and "https://" in out:
-                parts = out.split()
-                for p in parts:
-                    if p.startswith("https://"):
-                        self.web_url = p
-                    elif p.startswith("ssh "):
-                        self.ssh_url = p
-                if self.web_url:
-                    self._ready = True
-                    break
-            if attempt > 0 and attempt % 4 == 0:
-                print(f"[tmate] Still waiting... ({attempt}/30)", flush=True)
+            if out and "@" in out and "tmate.io" in out:
+                self.ssh_ro = out  # e.g. "ssh ro-xxxx@lon1.tmate.io"
+                # Parse user and host
+                # format: "ssh USER@HOST"
+                parts = out.replace("ssh ", "").strip().split("@")
+                if len(parts) == 2:
+                    self.ssh_user = parts[0]
+                    self.ssh_host = parts[1]
+                self._ready = True
+                print(f"[tmate] SSH (read-only): {out}", flush=True)
+                break
+            if attempt > 0 and attempt % 6 == 0:
+                print(f"[tmate] Still waiting... ({attempt}/40)", flush=True)
 
-        # cd to workspace inside the session
-        self._send_keys(f"cd {self.workspace_dir} && clear")
-        return self._ready
+        if not self._ready:
+            print("[tmate] ✗ No SSH URL received. Check internet access to tmate.io", flush=True)
+            return False
 
-    def _send_keys(self, keys: str):
-        sock = f"/tmp/tmate-{self.session_name}.sock"
+        # cd to workspace
         subprocess.run(
-            ["tmate", "-S", sock, "send-keys", "-t", self.session_name, keys, "Enter"],
+            ["tmate", "-S", self._sock, "send-keys", "-t",
+             self.session_name, f"cd {self.workspace_dir} && clear", "Enter"],
+            capture_output=True,
+        )
+        return True
+
+    def inject_command(self, command: str):
+        subprocess.run(
+            ["tmate", "-S", self._sock, "send-keys", "-t",
+             self.session_name, command, "Enter"],
             capture_output=True,
         )
 
-    def inject_command(self, command: str):
-        """Send a command to the tmate session."""
-        self._send_keys(command)
-
     def is_alive(self) -> bool:
-        sock = f"/tmp/tmate-{self.session_name}.sock"
         r = subprocess.run(
-            ["tmate", "-S", sock, "list-sessions"],
+            ["tmate", "-S", self._sock, "list-sessions"],
             capture_output=True,
         )
         return r.returncode == 0
 
     def stop(self):
-        sock = f"/tmp/tmate-{self.session_name}.sock"
-        subprocess.run(
-            ["tmate", "-S", sock, "kill-session"],
-            capture_output=True,
-        )
+        subprocess.run(["tmate", "-S", self._sock, "kill-session"],
+                       capture_output=True)
 
 
 class ShellManager:
@@ -116,23 +110,19 @@ class ShellManager:
         with self._init_lock:
             if self._session is None or not self._session.is_alive():
                 s = TmateSession("claude", self.workspace_dir)
-                ok = s.start()
-                if not ok:
-                    # tmate failed (no internet?) — try again without network
-                    # fallback: still return session, URLs will be None
-                    pass
+                s.start()
                 self._session = s
             return self._session
 
-    def get_web_url(self) -> Optional[str]:
-        if self._session:
-            return self._session.web_url
+    def get_ssh_info(self):
+        s = self._session
+        if s and s._ready:
+            return {"host": s.ssh_host, "user": s.ssh_user, "ro": s.ssh_ro}
         return None
 
     async def run_command_in_session(
         self, command: str, session_id: str = "default", timeout: float = 30.0
     ) -> dict:
-        """Run command for Claude tool. Show in tmate + capture output."""
         s = self._session
         if s and s.is_alive():
             s.inject_command(f"# [Claude] {command}")
@@ -159,17 +149,90 @@ class ShellManager:
         except Exception as e:
             return {"stdout": "", "stderr": str(e), "returncode": -1}
 
-    # WebSocket handle kept for compatibility but not used for terminal display
     async def handle_websocket(self, websocket: WebSocket, session_id: str):
-        await websocket.accept() if not websocket.client_state.value == 1 else None
-        await websocket.send_text(json.dumps({
-            "type": "tmate",
-            "web_url": self.get_web_url(),
-        }))
-        # Keep connection alive
+        """
+        Connect to tmate SSH read-only session via asyncssh
+        and stream output to browser xterm.js over WebSocket.
+        """
+        import asyncssh
+
+        s = self._session
+        if not s or not s._ready or not s.ssh_host:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "msg": "tmate session not ready yet, please wait...",
+            }))
+            await websocket.close()
+            return
+
+        await websocket.send_text(json.dumps({"type": "connected"}))
+
         try:
-            while True:
-                await asyncio.sleep(30)
-                await websocket.send_text(json.dumps({"type": "ping"}))
-        except Exception:
-            pass
+            async with asyncssh.connect(
+                s.ssh_host,
+                port=22,
+                username=s.ssh_user,
+                known_hosts=None,        # read-only token auth, no password needed
+                password="",
+                client_keys=[],
+                preferred_auth=["password"],
+            ) as conn:
+                async with conn.create_process(
+                    term_type="xterm-256color",
+                    term_size=(80, 24),
+                ) as proc:
+
+                    async def ws_to_ssh():
+                        """Forward browser keystrokes to SSH."""
+                        while True:
+                            try:
+                                msg = await websocket.receive()
+                                if msg.get("type") == "websocket.disconnect":
+                                    proc.stdin.write_eof()
+                                    return
+                                raw = msg.get("bytes") or (
+                                    msg.get("text", "").encode() if msg.get("text") else None
+                                )
+                                if not raw:
+                                    continue
+                                # Resize control message
+                                if raw[0:1] == b"{":
+                                    try:
+                                        obj = json.loads(raw)
+                                        if obj.get("type") == "resize":
+                                            proc.change_terminal_size(
+                                                int(obj["cols"]), int(obj["rows"])
+                                            )
+                                            continue
+                                    except Exception:
+                                        pass
+                                # It's a read-only session — ignore actual keystrokes
+                                # (tmate ro sessions don't accept input)
+                            except Exception:
+                                return
+
+                    async def ssh_to_ws():
+                        """Forward SSH output to browser."""
+                        try:
+                            while True:
+                                data = await proc.stdout.read(4096)
+                                if not data:
+                                    break
+                                if isinstance(data, str):
+                                    data = data.encode("utf-8", errors="replace")
+                                await websocket.send_bytes(data)
+                        except Exception:
+                            pass
+
+                    await asyncio.gather(ws_to_ssh(), ssh_to_ws())
+
+        except asyncssh.DisconnectError as e:
+            try:
+                await websocket.send_text(json.dumps({"type": "error", "msg": str(e)}))
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                await websocket.send_text(json.dumps({"type": "error", "msg": str(e)}))
+            except Exception:
+                pass
