@@ -10,7 +10,7 @@ from app.tools import (
     read_file_tool,
     write_file_tool,
     list_files_tool,
-    run_command_tool,
+    run_command,
     delete_path_tool,
     TOOL_DEFINITIONS,
     execute_tool,
