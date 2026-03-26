@@ -88,10 +88,19 @@ class ShellSession:
                 pass
 
     def inject_command(self, command: str):
-        """Send command to PTY as if typed by user."""
+        """Send command to PTY as if typed by user."""""
         if not command.endswith("\n"):
             command += "\n"
         self.write(command.encode("utf-8", errors="replace"))
+
+    def inject_claude_command(self, command: str):
+        """Inject Claude's command into PTY with green highlight."""""
+        # ESC[32m = green, ESC[1m = bold, ESC[0m = reset
+        GREEN  = "\x1b[1;32m"
+        RESET  = "\x1b[0m"
+        # Print highlighted label on its own line, then run command normally
+        banner = f"\r\n{GREEN}❯ [Claude] {command}{RESET}\r\n"
+        self.write(banner.encode("utf-8", errors="replace"))
 
     def stop(self):
         self._running = False
@@ -139,9 +148,9 @@ class ShellManager:
         """
         s = self._sessions.get(session_id)
 
-        # Show command in PTY terminal
+        # Show command in PTY terminal with green highlight
         if s and s.is_alive():
-            s.inject_command(command)
+            s.inject_claude_command(command)
 
         # Capture output separately for Claude's tool result
         try:
