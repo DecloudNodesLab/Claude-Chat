@@ -497,22 +497,31 @@ function connectShell() {
   shellWs.onopen = () => {
     st.textContent = T.shell_connected;
     st.className = 'shell-status connected';
+    // Send resize immediately and again after 500ms to ensure bash outputs prompt
     sendResize();
-    if (term) term.focus();
+    setTimeout(() => { sendResize(); if (term) term.focus(); }, 500);
   };
 
   shellWs.onmessage = (event) => {
     if (!term) return;
-    if (event.data instanceof ArrayBuffer) {
-      const arr = new Uint8Array(event.data);
-      // Skip JSON control frames {"type":"connected"}
-      if (arr[0] === 123) {
-        try { const m = JSON.parse(new TextDecoder().decode(arr)); if (m.type === 'connected') return; } catch(e) {}
-      }
-      term.write(arr);
-    } else {
-      try { const m = JSON.parse(event.data); if (m.type === 'connected') return; } catch(e) {}
+
+    // Text frame — only control messages come as text
+    if (typeof event.data === 'string') {
+      try {
+        const m = JSON.parse(event.data);
+        if (m.type === 'connected') return;
+      } catch(e) {}
+      // Shouldn't happen but render anyway
       term.write(event.data);
+      return;
+    }
+
+    // Binary frame — terminal data
+    if (event.data instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(event.data);
+      // Decode to string for xterm.js (handles UTF-8 sequences correctly)
+      const text = new TextDecoder('utf-8', {fatal: false}).decode(bytes);
+      term.write(text);
     }
   };
 
