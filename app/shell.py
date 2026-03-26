@@ -1,136 +1,136 @@
 import os
 import asyncio
 import json
-import select
-import signal
+import subprocess
 import threading
-import ptyprocess
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import WebSocket
 
 
-class ShellSession:
-    def __init__(self, session_id: str, workspace_dir: Path):
-        self.session_id = session_id
+class TmateSession:
+    """
+    Manages a tmate session.
+    - Starts tmate, reads the web read-only URL
+    - Provides inject_command via `tmate send-keys`
+    - Provides run_command for Claude tools via subprocess
+    """
+
+    def __init__(self, session_name: str, workspace_dir: Path):
+        self.session_name = session_name
         self.workspace_dir = workspace_dir
-        self._proc: Optional[ptyprocess.PtyProcess] = None
-        # Use a plain thread-safe list as ring buffer instead of asyncio.Queue
-        # because the queue must belong to the WS handler's event loop,
-        # not the loop at construction time.
-        self._buf: list = []
-        self._buf_lock = threading.Lock()
-        self._data_event = threading.Event()
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self.web_url: Optional[str] = None
+        self.ssh_url: Optional[str] = None
+        self._ready = False
+        self._proc: Optional[subprocess.Popen] = None
 
     def start(self):
+        """Start tmate session and wait for URLs."""
         env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
         env["HOME"] = str(self.workspace_dir)
-        env["PWD"] = str(self.workspace_dir)
-        env["LANG"] = "en_US.UTF-8"
-        env["LC_ALL"] = "en_US.UTF-8"
         for k in ("ANTHROPIC_API_KEY", "BASIC_AUTH_PASSWORD", "APP_SECRET_KEY"):
             env.pop(k, None)
 
-        self._proc = ptyprocess.PtyProcess.spawn(
-            ["/bin/bash", "--login"],
-            cwd=str(self.workspace_dir),
-            env=env,
-            dimensions=(24, 80),
+        # Kill existing session if any
+        subprocess.run(
+            ["tmate", "-S", f"/tmp/tmate-{self.session_name}.sock", "kill-session"],
+            capture_output=True,
         )
-        self._running = True
-        self._thread = threading.Thread(target=self._reader, daemon=True)
-        self._thread.start()
+        time.sleep(0.3)
 
-    def _reader(self):
-        """Background thread: read PTY fd with select, push chunks to buffer."""
-        fd = self._proc.fd
-        while self._running:
-            try:
-                r, _, _ = select.select([fd], [], [], 0.05)
-                if r:
-                    try:
-                        chunk = os.read(fd, 4096)
-                    except OSError:
-                        break
-                    if chunk:
-                        with self._buf_lock:
-                            self._buf.append(chunk)
-                        self._data_event.set()
-            except (ValueError, OSError):
-                break
-        self._running = False
-        self._data_event.set()  # unblock any waiter
+        sock = f"/tmp/tmate-{self.session_name}.sock"
 
-    def drain(self) -> bytes:
-        """Return and clear all buffered output."""
-        with self._buf_lock:
-            if not self._buf:
-                return b""
-            out = b"".join(self._buf)
-            self._buf.clear()
-            return out
+        # Start tmate with a named session
+        self._proc = subprocess.Popen(
+            ["tmate", "-S", sock, "new-session", "-d", "-s", self.session_name, "-x", "220", "-y", "50"],
+            env=env,
+            cwd=str(self.workspace_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._proc.wait()
 
-    def write(self, data: bytes):
-        if self._proc and self._running:
-            try:
-                self._proc.write(data)
-            except Exception:
-                pass
+        # Wait for tmate to be ready and fetch URLs
+        for _ in range(30):
+            time.sleep(0.5)
+            result = subprocess.run(
+                ["tmate", "-S", sock, "display", "-p",
+                 "#{tmate_web_ro} #{tmate_ssh_ro}"],
+                capture_output=True, text=True,
+            )
+            out = result.stdout.strip()
+            if out and "https://" in out:
+                parts = out.split()
+                for p in parts:
+                    if p.startswith("https://"):
+                        self.web_url = p
+                    elif p.startswith("ssh "):
+                        self.ssh_url = p
+                if self.web_url:
+                    self._ready = True
+                    break
 
-    def resize(self, rows: int, cols: int):
-        if self._proc and self._running:
-            try:
-                self._proc.setwinsize(rows, cols)
-            except Exception:
-                pass
+        # cd to workspace inside the session
+        self._send_keys(f"cd {self.workspace_dir} && clear")
+        return self._ready
+
+    def _send_keys(self, keys: str):
+        sock = f"/tmp/tmate-{self.session_name}.sock"
+        subprocess.run(
+            ["tmate", "-S", sock, "send-keys", "-t", self.session_name, keys, "Enter"],
+            capture_output=True,
+        )
 
     def inject_command(self, command: str):
-        if not command.endswith("\n"):
-            command += "\n"
-        self.write(command.encode("utf-8", errors="replace"))
-
-    def stop(self):
-        self._running = False
-        self._data_event.set()
-        if self._proc:
-            try:
-                self._proc.terminate(force=True)
-            except Exception:
-                pass
-            self._proc = None
+        """Send a command to the tmate session."""
+        self._send_keys(command)
 
     def is_alive(self) -> bool:
-        if not self._running or self._proc is None:
-            return False
-        try:
-            return self._proc.isalive()
-        except Exception:
-            return False
+        sock = f"/tmp/tmate-{self.session_name}.sock"
+        r = subprocess.run(
+            ["tmate", "-S", sock, "list-sessions"],
+            capture_output=True,
+        )
+        return r.returncode == 0
+
+    def stop(self):
+        sock = f"/tmp/tmate-{self.session_name}.sock"
+        subprocess.run(
+            ["tmate", "-S", sock, "kill-session"],
+            capture_output=True,
+        )
 
 
 class ShellManager:
     def __init__(self, workspace_dir: Path):
         self.workspace_dir = workspace_dir
-        self._sessions: Dict[str, ShellSession] = {}
+        self._session: Optional[TmateSession] = None
+        self._init_lock = threading.Lock()
 
-    def get_or_create_session(self, session_id: str) -> ShellSession:
-        s = self._sessions.get(session_id)
-        if s is None or not s.is_alive():
-            if s:
-                s.stop()
-            s = ShellSession(session_id, self.workspace_dir)
-            s.start()
-            self._sessions[session_id] = s
-        return s
+    def get_or_create_session(self) -> TmateSession:
+        with self._init_lock:
+            if self._session is None or not self._session.is_alive():
+                s = TmateSession("claude", self.workspace_dir)
+                ok = s.start()
+                if not ok:
+                    # tmate failed (no internet?) — try again without network
+                    # fallback: still return session, URLs will be None
+                    pass
+                self._session = s
+            return self._session
+
+    def get_web_url(self) -> Optional[str]:
+        if self._session:
+            return self._session.web_url
+        return None
 
     async def run_command_in_session(
         self, command: str, session_id: str = "default", timeout: float = 30.0
     ) -> dict:
-        s = self._sessions.get(session_id)
+        """Run command for Claude tool. Show in tmate + capture output."""
+        s = self._session
         if s and s.is_alive():
             s.inject_command(f"# [Claude] {command}")
 
@@ -148,7 +148,6 @@ class ShellManager:
                 proc.kill()
                 await proc.communicate()
                 return {"stdout": "", "stderr": f"Timed out after {int(timeout)}s", "returncode": -1}
-
             return {
                 "stdout": out.decode("utf-8", errors="replace")[:16000],
                 "stderr": err.decode("utf-8", errors="replace")[:4000],
@@ -157,55 +156,17 @@ class ShellManager:
         except Exception as e:
             return {"stdout": "", "stderr": str(e), "returncode": -1}
 
+    # WebSocket handle kept for compatibility but not used for terminal display
     async def handle_websocket(self, websocket: WebSocket, session_id: str):
-        session = self.get_or_create_session(session_id)
-
-        await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
-
-        # Pump PTY → WS: poll the thread-safe buffer every 20ms
-        async def pump():
-            nonlocal session
-            while True:
-                await asyncio.sleep(0.02)
-                if not session.is_alive():
-                    await asyncio.sleep(1)
-                    session = self.get_or_create_session(session_id)
-                    continue
-                chunk = session.drain()
-                if chunk:
-                    try:
-                        await websocket.send_bytes(chunk)
-                    except Exception:
-                        return
-
-        pump_task = asyncio.create_task(pump())
-
+        await websocket.accept() if not websocket.client_state.value == 1 else None
+        await websocket.send_text(json.dumps({
+            "type": "tmate",
+            "web_url": self.get_web_url(),
+        }))
+        # Keep connection alive
         try:
             while True:
-                msg = await websocket.receive()
-                if msg.get("type") == "websocket.disconnect":
-                    break
-
-                raw = msg.get("bytes") or (msg.get("text", "").encode() if msg.get("text") else None)
-                if not raw:
-                    continue
-
-                # JSON control message?
-                if raw[0:1] == b"{":
-                    try:
-                        obj = json.loads(raw)
-                        if obj.get("type") == "resize":
-                            session.resize(int(obj["rows"]), int(obj["cols"]))
-                            continue
-                    except Exception:
-                        pass
-                session.write(raw)
-
+                await asyncio.sleep(30)
+                await websocket.send_text(json.dumps({"type": "ping"}))
         except Exception:
             pass
-        finally:
-            pump_task.cancel()
-            try:
-                await pump_task
-            except asyncio.CancelledError:
-                pass
