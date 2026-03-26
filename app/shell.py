@@ -53,7 +53,8 @@ class TmateSession:
         self._proc.wait()
 
         # Wait for tmate to be ready and fetch URLs
-        for _ in range(30):
+        print("[tmate] Waiting for URL from tmate.io...", flush=True)
+        for attempt in range(30):
             time.sleep(0.5)
             result = subprocess.run(
                 ["tmate", "-S", sock, "display", "-p",
@@ -71,6 +72,8 @@ class TmateSession:
                 if self.web_url:
                     self._ready = True
                     break
+            if attempt > 0 and attempt % 4 == 0:
+                print(f"[tmate] Still waiting... ({attempt}/30)", flush=True)
 
         # cd to workspace inside the session
         self._send_keys(f"cd {self.workspace_dir} && clear")
