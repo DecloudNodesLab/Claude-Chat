@@ -99,7 +99,7 @@ class ShellSession:
         GREEN  = "\x1b[1;32m"
         RESET  = "\x1b[0m"
         # Print highlighted label on its own line, then run command normally
-        banner = f"\r\n{GREEN}❯ [Claude] {command}{RESET}\r\n"
+        banner = f"\r\n{GREEN}> [Claude] {command}{RESET}\r\n"
         self.write(banner.encode("utf-8", errors="replace"))
 
     def stop(self):
