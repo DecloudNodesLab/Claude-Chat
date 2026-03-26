@@ -190,8 +190,10 @@
     cursor: pointer; font-size: 11px; transition: all 0.15s;
   }
   .shell-reconnect-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .shell-container { flex: 1; overflow: hidden; padding: 4px; }
-  #terminal { height: 100%; }
+  .shell-container { flex: 1; overflow: hidden; padding: 4px; cursor: text; position: relative; }
+  #terminal { height: 100%; width: 100%; }
+  .xterm { height: 100% !important; }
+  .xterm-screen { cursor: text !important; }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -621,52 +623,71 @@ function autoResize(el) {
 }
 
 // ─── Shell / Terminal ─────────────────────────────────────────────────────────
+let _termDataDisposable = null;  // хранит disposable от term.onData
+
 function initTerminal() {
-  if (term) { term.dispose(); term = null; }
+  if (term) {
+    try { term.dispose(); } catch(e) {}
+    term = null;
+    fitAddon = null;
+    _termDataDisposable = null;
+  }
 
   term = new Terminal({
     theme: {
-      background: '#0a0c12',
-      foreground: '#e2e8f0',
-      cursor: '#7c8dff',
+      background: '#0a0c12', foreground: '#e2e8f0', cursor: '#7c8dff',
       selectionBackground: '#2d3250',
-      black: '#1e2130',
-      brightBlack: '#64748b',
-      blue: '#7c8dff',
-      brightBlue: '#a5b4fc',
-      green: '#4ade80',
-      brightGreen: '#86efac',
-      red: '#f87171',
-      brightRed: '#fca5a5',
-      yellow: '#fbbf24',
-      brightYellow: '#fde68a',
-      cyan: '#22d3ee',
-      brightCyan: '#67e8f9',
-      magenta: '#c084fc',
-      brightMagenta: '#d8b4fe',
-      white: '#e2e8f0',
-      brightWhite: '#f8fafc',
+      black: '#1e2130', brightBlack: '#64748b',
+      blue: '#7c8dff', brightBlue: '#a5b4fc',
+      green: '#4ade80', brightGreen: '#86efac',
+      red: '#f87171', brightRed: '#fca5a5',
+      yellow: '#fbbf24', brightYellow: '#fde68a',
+      cyan: '#22d3ee', brightCyan: '#67e8f9',
+      magenta: '#c084fc', brightMagenta: '#d8b4fe',
+      white: '#e2e8f0', brightWhite: '#f8fafc',
     },
     fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
     fontSize: 13,
     lineHeight: 1.4,
     cursorBlink: true,
     scrollback: 5000,
+    convertEol: false,
     allowProposedApi: true,
   });
 
-  fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
+  // Detect FitAddon export style from CDN
+  let FitAddonClass = null;
+  if (typeof FitAddon !== 'undefined') {
+    FitAddonClass = FitAddon.FitAddon || (typeof FitAddon === 'function' ? FitAddon : null);
+  }
+  if (FitAddonClass) {
+    fitAddon = new FitAddonClass();
+    term.loadAddon(fitAddon);
+  }
 
   const container = document.getElementById('terminal');
   term.open(container);
-  fitAddon.fit();
 
-  connectShell();
+  // Вешаем onData ОДИН РАЗ здесь, не в connectShell
+  _termDataDisposable = term.onData(data => {
+    if (shellWs && shellWs.readyState === WebSocket.OPEN) {
+      shellWs.send(new TextEncoder().encode(data));
+    }
+  });
+
+  // Клик = фокус
+  container.addEventListener('click', () => term && term.focus());
+
+  requestAnimationFrame(() => {
+    if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
+    term.focus();
+    connectShell();
+  });
 }
 
 function connectShell() {
   if (shellWs) {
+    shellWs.onclose = null;  // не триггерим auto-reconnect
     try { shellWs.close(); } catch(e) {}
     shellWs = null;
   }
@@ -677,28 +698,40 @@ function connectShell() {
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${proto}//${location.host}/ws/shell/${shellSessionId}`;
-  shellWs = new WebSocket(url);
+
+  try {
+    shellWs = new WebSocket(url);
+  } catch(e) {
+    statusEl.textContent = 'WebSocket error: ' + e.message;
+    return;
+  }
   shellWs.binaryType = 'arraybuffer';
 
   shellWs.onopen = () => {
     statusEl.textContent = T.shell_connected;
     statusEl.className = 'shell-status connected';
-    // Send initial resize
     sendResize();
+    if (term) term.focus();
   };
 
   shellWs.onmessage = (event) => {
+    if (!term) return;
     if (event.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(event.data));
+      const arr = new Uint8Array(event.data);
+      // Пропускаем JSON-контрол сообщения ({"type":"connected",...})
+      if (arr.length > 0 && arr[0] === 123) {
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(arr));
+          if (msg.type === 'connected') return;
+        } catch(e) {}
+      }
+      term.write(arr);
     } else if (typeof event.data === 'string') {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'connected') {
-          // Connected message
-        }
-      } catch(e) {
-        term.write(event.data);
-      }
+        if (msg.type === 'connected') return;
+      } catch(e) {}
+      term.write(event.data);
     }
   };
 
@@ -710,97 +743,21 @@ function connectShell() {
   shellWs.onclose = () => {
     statusEl.textContent = T.shell_disconnected;
     statusEl.className = 'shell-status disconnected';
-    // Auto-reconnect after 3s
     setTimeout(() => {
-      if (!shellWs || shellWs.readyState > 1) {
-        connectShell();
-      }
+      if (!shellWs || shellWs.readyState > 1) connectShell();
     }, 3000);
   };
-
-  // Send terminal input to server
-  term.onData(data => {
-    if (shellWs && shellWs.readyState === WebSocket.OPEN) {
-      shellWs.send(new TextEncoder().encode(data));
-    }
-  });
 }
 
 function sendResize() {
   if (shellWs && shellWs.readyState === WebSocket.OPEN && term) {
-    shellWs.send(JSON.stringify({
-      type: 'resize',
-      rows: term.rows,
-      cols: term.cols,
-    }));
+    shellWs.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
   }
 }
 
 function reconnectShell() {
   connectShell();
 }
-
-// ─── Resize handle ────────────────────────────────────────────────────────────
-function initResizeHandle() {
-  const handle = document.getElementById('resizeHandle');
-  const shellSection = document.getElementById('shellSection');
-  let startY = 0, startH = 0, dragging = false;
-
-  handle.addEventListener('mousedown', (e) => {
-    dragging = true;
-    startY = e.clientY;
-    startH = shellSection.offsetHeight;
-    document.body.style.userSelect = 'none';
-  });
-
-  document.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    const diff = startY - e.clientY;
-    const newH = Math.max(150, Math.min(startH + diff, window.innerHeight * 0.7));
-    shellSection.style.height = newH + 'px';
-    shellSection.style.maxHeight = 'none';
-    if (fitAddon) fitAddon.fit();
-    sendResize();
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (dragging) {
-      dragging = false;
-      document.body.style.userSelect = '';
-      if (fitAddon) fitAddon.fit();
-      sendResize();
-    }
-  });
-}
-
-// ─── Window resize ────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {
-  if (fitAddon) {
-    fitAddon.fit();
-    sendResize();
-  }
-});
-
-// ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  // Load first chat if exists
-  const firstItem = document.querySelector('.chat-item');
-  if (firstItem) {
-    const chatId = firstItem.id.replace('chat-item-', '');
-    loadChat(chatId);
-  }
-
-  initTerminal();
-  initResizeHandle();
-
-  // xterm fit addon needs time
-  setTimeout(() => {
-    if (fitAddon) {
-      fitAddon.fit();
-      sendResize();
-    }
-  }, 300);
-});
 </script>
 </body>
 </html>
