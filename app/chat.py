@@ -1,25 +1,21 @@
 import os
-import json
-import asyncio
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Tuple
 
 import anthropic
 
-from app.tools import (
-    TOOL_DEFINITIONS,
-    execute_tool,
-)
+from app.tools import TOOL_DEFINITIONS, execute_tool
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-5")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 MAX_OUTPUT_TOKENS = 4096
-SYSTEM_PROMPT = """You are a helpful AI assistant with access to a Linux workspace.
+SYSTEM_PROMPT = """You are a helpful AI assistant with access to a Linux workspace running as root inside a Docker container.
 You can read/write files, list directories, and run shell commands in /workspace.
 Always use the available tools when the user asks you to work with files or run commands.
 When running commands, explain what you are doing.
 All file operations are restricted to /workspace directory.
+You are already root - never use sudo, it is not needed.
 """
 
 
@@ -37,7 +33,7 @@ async def handle_chat_message(
     tool_uses_log = []
     max_iterations = 10
 
-    for iteration in range(max_iterations):
+    for _ in range(max_iterations):
         response = await client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=MAX_OUTPUT_TOKENS,
@@ -62,53 +58,28 @@ async def handle_chat_message(
 
         tool_results = []
         for tool_block in tool_use_blocks:
-            tool_name = tool_block.name
-            tool_input = tool_block.input
-            tool_id = tool_block.id
-
             try:
                 result = await execute_tool(
-                    tool_name=tool_name,
-                    tool_input=tool_input,
+                    tool_name=tool_block.name,
+                    tool_input=tool_block.input,
                     workspace_dir=workspace_dir,
                     shell_manager=shell_manager,
                 )
-                tool_uses_log.append({
-                    "tool": tool_name,
-                    "input": tool_input,
-                    "result": result,
-                    "error": None,
-                })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": str(result),
-                })
+                tool_uses_log.append({"tool": tool_block.name, "input": tool_block.input, "result": result, "error": None})
+                tool_results.append({"type": "tool_result", "tool_use_id": tool_block.id, "content": str(result)})
             except Exception as e:
-                error_msg = str(e)
-                tool_uses_log.append({
-                    "tool": tool_name,
-                    "input": tool_input,
-                    "result": None,
-                    "error": error_msg,
-                })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": f"Error: {error_msg}",
-                    "is_error": True,
-                })
+                err = str(e)
+                tool_uses_log.append({"tool": tool_block.name, "input": tool_block.input, "result": None, "error": err})
+                tool_results.append({"type": "tool_result", "tool_use_id": tool_block.id, "content": f"Error: {err}", "is_error": True})
 
         api_messages.append({"role": "user", "content": tool_results})
 
-    return "I've completed the requested operations. Please let me know if you need anything else.", tool_uses_log
+    return "Operations completed.", tool_uses_log
 
 
 def _convert_messages(messages: List[Dict]) -> List[Dict]:
-    result = []
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content", "")
-        if role in ("user", "assistant") and content:
-            result.append({"role": role, "content": content})
-    return result
+    return [
+        {"role": m["role"], "content": m["content"]}
+        for m in messages
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
