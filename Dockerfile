@@ -13,13 +13,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Download xterm.js static files locally so CDN is not needed
 RUN mkdir -p /app/static/xterm && \
-    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js" \
-         -o /app/static/xterm/xterm.min.js && \
-    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" \
-         -o /app/static/xterm/xterm.min.css && \
-    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js" \
-         -o /app/static/xterm/addon-fit.min.js && \
-    echo "xterm.js downloaded: $(wc -c < /app/static/xterm/xterm.min.js) bytes"
+    curl -fsSL "https://unpkg.com/xterm@5.3.0/lib/xterm.js" \
+         -o /app/static/xterm/xterm.js && \
+    curl -fsSL "https://unpkg.com/xterm@5.3.0/css/xterm.css" \
+         -o /app/static/xterm/xterm.css && \
+    curl -fsSL "https://unpkg.com/@xterm/addon-fit@0.8.0/lib/addon-fit.js" \
+         -o /app/static/xterm/addon-fit.js
 
 COPY app/ ./app/
 COPY templates/ ./templates/
