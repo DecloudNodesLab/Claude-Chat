@@ -227,8 +227,129 @@ function renderMessages(msgs){
   if(!msgs||!msgs.length){ c.innerHTML='<div class="messages-placeholder">'+T.select_chat+'</div>'; return; }
   for(const m of msgs) if(m.role==='user'||m.role==='assistant')appendMsg(m.role,m.content,[]);
 }
-function fmt(t){ if(!t)return ''; let s=esc(t); s=s.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c}</code></pre>`); s=s.replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`); return s; }
 function esc(t){ if(typeof t!=='string')t=String(t||''); return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function fmt(text) {
+  if (!text) return '';
+  let s = text;
+
+  // 1. Extract and protect code blocks first (avoid processing their content)
+  const codeBlocks = [];
+  s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    const langLabel = lang || 'code';
+    const escaped = esc(code.replace(/^\n/, '').replace(/\n$/, ''));
+    codeBlocks.push(
+      `<div class="code-header"><span>${esc(langLabel)}</span>` +
+      `<button class="copy-code-btn" onclick="copyCode(this)">Copy</button></div>` +
+      `<code>${escaped}</code>`
+    );
+    return `\x00CODE${idx}\x00`;
+  });
+
+  // 2. Protect inline code
+  const inlineCodes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => {
+    const idx = inlineCodes.length;
+    inlineCodes.push(`<code>${esc(c)}</code>`);
+    return `\x00INLINE${idx}\x00`;
+  });
+
+  // 3. Escape HTML in remaining text
+  s = esc(s);
+
+  // 4. Headings (must be at line start)
+  s = s.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // 5. Blockquotes
+  s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // Merge consecutive blockquotes
+  s = s.replace(/<\/blockquote>\n<blockquote>/g, '\n');
+
+  // 6. HR
+  s = s.replace(/^(---+|\*\*\*+)$/gm, '<hr>');
+
+  // 7. Bold and italic
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^\s*][^*]*?)\*/g, '<em>$1</em>');
+  s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+  s = s.replace(/_([^\s_][^_]*?)_/g, '<em>$1</em>');
+
+  // 8. Strikethrough
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+  // 9. Links  [text](url)
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, txt, url) => {
+    const safeUrl = url.startsWith('http') || url.startsWith('/') || url.startsWith('#') ? url : '#';
+    return `<a href="${esc(safeUrl)}" target="_blank" rel="noopener">${txt}</a>`;
+  });
+
+  // 10. Auto-links
+  s = s.replace(/(?<![&quot;'=])(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+  // 11. Tables
+  s = s.replace(/(?:^|\n)((?:\|[^\n]+\|\n?)+)/g, (_, table) => {
+    const rows = table.trim().split('\n').filter(r => r.trim());
+    if (rows.length < 2) return _ ;
+    let html = '<table>';
+    rows.forEach((row, i) => {
+      if (/^\|[-| :]+\|$/.test(row.trim())) return; // separator row
+      const cells = row.split('|').filter((_, ci) => ci > 0 && ci < row.split('|').length - 1);
+      const tag = i === 0 ? 'th' : 'td';
+      html += '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+    });
+    html += '</table>';
+    return html;
+  });
+
+  // 12. Unordered lists
+  s = s.replace(/((?:^[-*+] .+\n?)+)/gm, block => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^[-*+] /, '')}</li>`).join('');
+    return `<ul>${items}</ul>`;
+  });
+
+  // 13. Ordered lists
+  s = s.replace(/((?:^\d+\. .+\n?)+)/gm, block => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^\d+\. /, '')}</li>`).join('');
+    return `<ol>${items}</ol>`;
+  });
+
+  // 14. Paragraphs — wrap double-newline-separated blocks not already wrapped in tags
+  const blockTags = /^<(h[1-6]|ul|ol|li|blockquote|table|pre|hr|div)/;
+  const paras = s.split(/\n{2,}/);
+  s = paras.map(p => {
+    p = p.trim();
+    if (!p) return '';
+    if (blockTags.test(p)) return p;
+    // Single newlines within paragraph → <br>
+    p = p.replace(/\n/g, '<br>');
+    return `<p>${p}</p>`;
+  }).join('\n');
+
+  // 15. Restore inline codes
+  inlineCodes.forEach((code, idx) => { s = s.replace(`\x00INLINE${idx}\x00`, code); });
+
+  // 16. Restore code blocks
+  codeBlocks.forEach((block, idx) => { s = s.replace(`\x00CODE${idx}\x00`, `<pre>${block}</pre>`); });
+
+  return s;
+}
+
+function copyCode(btn) {
+  const pre = btn.closest('pre');
+  const code = pre ? pre.querySelector('code') : null;
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent || '').then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  }).catch(() => {});
+}
 function onChatKeydown(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendMessage(); } }
 function autoResize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,130)+'px'; }
 
