@@ -723,31 +723,47 @@ function connectShell() {
 
   shellWs.onmessage = (event) => {
     if (!term) return;
+
+    // Try to parse as JSON control message first
+    let raw;
     if (event.data instanceof ArrayBuffer) {
-      const arr = new Uint8Array(event.data);
-      // Skip JSON control messages
-      if (arr.length > 0 && arr[0] === 123) {
-        try {
-          const msg = JSON.parse(new TextDecoder().decode(arr));
-          if (msg.type === 'connected') return;
-          if (msg.type === 'error') {
-            term.writeln('\r\n\x1b[31m[Error] ' + msg.msg + '\x1b[0m\r\n');
-            return;
-          }
-        } catch(e) {}
-      }
-      term.write(arr);
-    } else if (typeof event.data === 'string') {
+      raw = new Uint8Array(event.data);
+    } else {
+      raw = event.data;
+    }
+
+    // Check for JSON (starts with '{')
+    const firstByte = (event.data instanceof ArrayBuffer)
+      ? new Uint8Array(event.data)[0]
+      : event.data.charCodeAt(0);
+
+    if (firstByte === 123) { // '{'
       try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'connected') return;
+        const text = (event.data instanceof ArrayBuffer)
+          ? new TextDecoder().decode(event.data)
+          : event.data;
+        const msg = JSON.parse(text);
+        if (msg.type === 'connected') {
+          return;
+        }
+        if (msg.type === 'info') {
+          term.writeln('\r\x1b[33m' + msg.msg + '\x1b[0m');
+          return;
+        }
         if (msg.type === 'error') {
-          term.writeln('\r\n\x1b[31m[Error] ' + msg.msg + '\x1b[0m\r\n');
-          // Retry after 3s - tmate might still be starting
-          _reconnectTimer = setTimeout(connectShell, 3000);
+          term.writeln('\r\x1b[31m[Error] ' + msg.msg + '\x1b[0m');
+          // Auto retry after 4s
+          if (_reconnectTimer) clearTimeout(_reconnectTimer);
+          _reconnectTimer = setTimeout(connectShell, 4000);
           return;
         }
       } catch(e) {}
+    }
+
+    // Regular terminal data
+    if (event.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(event.data));
+    } else {
       term.write(event.data);
     }
   };
