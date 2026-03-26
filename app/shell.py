@@ -1,26 +1,37 @@
 import os
 import asyncio
 import json
-import select
+import subprocess
 import threading
+import pty
+import select
+import struct
+import fcntl
+import termios
 from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import WebSocket
 
 
+def _try_open_pty():
+    """Try to open a PTY. Returns (master_fd, slave_fd) or raises."""
+    return pty.openpty()
+
+
 class ShellSession:
     def __init__(self, session_id: str, workspace_dir: Path):
         self.session_id = session_id
         self.workspace_dir = workspace_dir
+        self._master_fd: Optional[int] = None
         self._proc = None
         self._buf: list = []
         self._buf_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._use_pty = False
 
     def start(self):
-        import ptyprocess
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         env["HOME"] = "/root"
@@ -29,30 +40,104 @@ class ShellSession:
         for k in ("ANTHROPIC_API_KEY", "BASIC_AUTH_PASSWORD", "APP_SECRET_KEY"):
             env.pop(k, None)
 
-        self._proc = ptyprocess.PtyProcess.spawn(
-            ["/bin/bash", "--login"],
+        # Try PTY via ptyprocess
+        try:
+            import ptyprocess
+            self._proc = ptyprocess.PtyProcess.spawn(
+                ["/bin/bash", "--login"],
+                cwd=str(self.workspace_dir),
+                env=env,
+                dimensions=(24, 80),
+            )
+            self._use_pty = True
+            self._running = True
+            self._thread = threading.Thread(target=self._reader_ptyprocess, daemon=True)
+            self._thread.start()
+            print("[shell] started via ptyprocess", flush=True)
+            return
+        except Exception as e:
+            print(f"[shell] ptyprocess failed: {e}, trying os.openpty...", flush=True)
+
+        # Try raw PTY via os.openpty
+        try:
+            master_fd, slave_fd = pty.openpty()
+            # test it works
+            env2 = env.copy()
+            self._proc = subprocess.Popen(
+                ["/bin/bash", "--login"],
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                cwd=str(self.workspace_dir),
+                env=env2,
+                close_fds=True,
+                preexec_fn=os.setsid,
+            )
+            os.close(slave_fd)
+            self._master_fd = master_fd
+            self._use_pty = False  # using raw fd
+            self._running = True
+            self._thread = threading.Thread(target=self._reader_fd, daemon=True)
+            self._thread.start()
+            print("[shell] started via os.openpty", flush=True)
+            return
+        except Exception as e:
+            print(f"[shell] os.openpty failed: {e}, using pipe fallback...", flush=True)
+
+        # Pipe fallback (no TTY — limited but functional)
+        env["PS1"] = "\\u@workspace:\\w\\$ "
+        self._proc = subprocess.Popen(
+            ["bash", "--norc", "--noprofile", "-i"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd=str(self.workspace_dir),
             env=env,
-            dimensions=(24, 80),
+            bufsize=0,
         )
+        self._use_pty = False
+        self._master_fd = None
         self._running = True
-        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread = threading.Thread(target=self._reader_pipe, daemon=True)
         self._thread.start()
+        print("[shell] started via pipe fallback", flush=True)
 
-    def _reader(self):
-        fd = self._proc.fd
+    def _reader_ptyprocess(self):
         while self._running:
             try:
-                r, _, _ = select.select([fd], [], [], 0.05)
+                data = self._proc.read(4096)
+                if data:
+                    with self._buf_lock:
+                        self._buf.append(data)
+            except EOFError:
+                break
+            except Exception:
+                break
+        self._running = False
+
+    def _reader_fd(self):
+        while self._running:
+            try:
+                r, _, _ = select.select([self._master_fd], [], [], 0.05)
                 if r:
                     try:
-                        chunk = os.read(fd, 4096)
+                        chunk = os.read(self._master_fd, 4096)
                     except OSError:
                         break
                     if chunk:
                         with self._buf_lock:
                             self._buf.append(chunk)
             except (ValueError, OSError):
+                break
+        self._running = False
+
+    def _reader_pipe(self):
+        while self._running and self._proc:
+            try:
+                chunk = self._proc.stdout.read(4096)
+                if not chunk:
+                    break
+                with self._buf_lock:
+                    self._buf.append(chunk)
+            except (OSError, ValueError):
                 break
         self._running = False
 
@@ -65,18 +150,28 @@ class ShellSession:
             return out
 
     def write(self, data: bytes):
-        if self._proc and self._running:
-            try:
+        if not self._running:
+            return
+        try:
+            if hasattr(self._proc, 'write'):  # ptyprocess
                 self._proc.write(data)
-            except Exception:
-                pass
+            elif self._master_fd is not None:  # raw fd
+                os.write(self._master_fd, data)
+            elif self._proc and self._proc.stdin:  # pipe
+                self._proc.stdin.write(data)
+                self._proc.stdin.flush()
+        except Exception:
+            pass
 
     def resize(self, rows: int, cols: int):
-        if self._proc and self._running:
-            try:
+        try:
+            if hasattr(self._proc, 'setwinsize'):
                 self._proc.setwinsize(rows, cols)
-            except Exception:
-                pass
+            elif self._master_fd is not None:
+                winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
+        except Exception:
+            pass
 
     def inject_command(self, command: str):
         if not command.endswith("\n"):
@@ -85,9 +180,18 @@ class ShellSession:
 
     def stop(self):
         self._running = False
+        if self._master_fd is not None:
+            try:
+                os.close(self._master_fd)
+            except Exception:
+                pass
+            self._master_fd = None
         if self._proc:
             try:
-                self._proc.terminate(force=True)
+                if hasattr(self._proc, 'terminate'):
+                    self._proc.terminate(force=True)
+                else:
+                    self._proc.terminate()
             except Exception:
                 pass
             self._proc = None
@@ -96,7 +200,9 @@ class ShellSession:
         if not self._running or self._proc is None:
             return False
         try:
-            return self._proc.isalive()
+            if hasattr(self._proc, 'isalive'):
+                return self._proc.isalive()
+            return self._proc.poll() is None
         except Exception:
             return False
 
