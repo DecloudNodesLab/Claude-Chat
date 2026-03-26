@@ -188,6 +188,80 @@ async def get_task(task_id: str, _=Depends(basic_auth)):
     return task
 
 
+@app.get("/files")
+async def list_files_api(path: str = "", _=Depends(basic_auth)):
+    """List files and directories in workspace."""
+    import stat as stat_mod
+    base = WORKSPACE_DIR.resolve()
+    target = (base / path).resolve() if path else base
+    if not str(target).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    items = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda e: (e.is_file(), e.name.lower())):
+            rel = str(entry.relative_to(base))
+            st = entry.stat()
+            items.append({
+                "name": entry.name,
+                "path": rel,
+                "is_dir": entry.is_dir(),
+                "size": st.st_size if entry.is_file() else 0,
+                "modified": int(st.st_mtime),
+            })
+    except PermissionError:
+        pass
+    current_rel = str(target.relative_to(base)) if target != base else ""
+    parent_rel = str(target.parent.relative_to(base)) if target != base else None
+    return {"items": items, "current": current_rel, "parent": parent_rel}
+
+
+@app.get("/files/download")
+async def download_file(path: str, _=Depends(basic_auth)):
+    """Download a file from workspace."""
+    from fastapi.responses import FileResponse
+    base = WORKSPACE_DIR.resolve()
+    target = (base / path).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path=str(target), filename=target.name)
+
+
+@app.delete("/files")
+async def delete_file(path: str, _=Depends(basic_auth)):
+    """Delete a file or directory from workspace."""
+    import shutil
+    base = WORKSPACE_DIR.resolve()
+    target = (base / path).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target.is_file():
+        target.unlink()
+    else:
+        shutil.rmtree(target)
+    return {"ok": True}
+
+
+@app.post("/files/upload")
+async def upload_to_path(path: str = "", file: UploadFile = File(...), _=Depends(basic_auth)):
+    """Upload a file to a specific workspace directory."""
+    base = WORKSPACE_DIR.resolve()
+    dest_dir = (base / path).resolve() if path else base
+    if not str(dest_dir).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    filename = Path(file.filename).name
+    dest = dest_dir / filename
+    data = await file.read()
+    dest.write_bytes(data)
+    return {"ok": True, "filename": filename, "size": len(data)}
+
+
 @app.websocket("/ws/shell/{session_id}")
 async def shell_ws(websocket: WebSocket, session_id: str):
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_") or "default"
