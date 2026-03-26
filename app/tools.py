@@ -52,7 +52,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "run_command",
+        "name": "run_command_tool",
         "description": "Run a shell command in /workspace. Returns stdout, stderr, and exit code. The command is also visible in the user's shell window.",
         "input_schema": {
             "type": "object",
