@@ -5,7 +5,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,11 +25,13 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 
 templates = Jinja2Templates(directory="templates")
 
-# Serve xterm.js locally (no CDN dependency)
-import pathlib
-_static_dir = pathlib.Path("/app/static")
-if _static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+def _get_index_html() -> str:
+    """Read index.html from workspace if exists, otherwise fall back to templates/."""
+    workspace_index = WORKSPACE_DIR / "index.html"
+    if workspace_index.exists():
+        return workspace_index.read_text(encoding="utf-8")
+    return (Path("templates") / "index.html").read_text(encoding="utf-8")
+
 storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
 
@@ -62,6 +63,20 @@ async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
     t = get_translations(locale)
     chats = storage.list_chats()
+
+    workspace_index = WORKSPACE_DIR / "index.html"
+    if workspace_index.exists():
+        # Serve directly from workspace — render Jinja2 manually
+        from jinja2 import Environment
+        src = workspace_index.read_text(encoding="utf-8")
+        env = Environment(autoescape=False)
+        template = env.from_string(src)
+        html = template.render(
+            t=t, locale=locale, chats=chats,
+            supported_locales=SUPPORTED_LOCALES,
+        )
+        return HTMLResponse(content=html)
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "t": t,
