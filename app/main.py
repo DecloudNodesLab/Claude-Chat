@@ -1,8 +1,6 @@
 import os
 import json
 import uuid
-import asyncio
-import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
@@ -30,23 +28,6 @@ storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
 
 
-def _start_tmate_bg():
-    print("[tmate] Starting session...", flush=True)
-    try:
-        s = shell_manager.get_or_create_session()
-        if s._ready:
-            print(f"[tmate] ✓ Ready. SSH (read-only): {s.ssh_ro}", flush=True)
-        else:
-            print("[tmate] ✗ Session not ready", flush=True)
-    except Exception as e:
-        print(f"[tmate] ✗ Error: {e}", flush=True)
-
-
-@app.on_event("startup")
-async def startup():
-    threading.Thread(target=_start_tmate_bg, daemon=True).start()
-
-
 def get_locale(request: Request) -> str:
     c = request.cookies.get("locale")
     if c and c in SUPPORTED_LOCALES:
@@ -69,28 +50,17 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/tmate-status")
-async def tmate_status(_=Depends(basic_auth)):
-    s = shell_manager._session
-    if s and s._ready and s.ssh_ro:
-        return {"ready": True, "ssh_ro": s.ssh_ro}
-    return {"ready": False, "ssh_ro": None}
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
     t = get_translations(locale)
     chats = storage.list_chats()
-    s = shell_manager._session
-    ssh_ro = (s.ssh_ro or "") if (s and s._ready) else ""
     return templates.TemplateResponse("index.html", {
         "request": request,
         "t": t,
         "locale": locale,
         "chats": chats,
         "supported_locales": SUPPORTED_LOCALES,
-        "ssh_ro": ssh_ro,
     })
 
 
