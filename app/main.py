@@ -34,11 +34,10 @@ def _start_tmate_bg():
     print("[tmate] Starting session...", flush=True)
     try:
         s = shell_manager.get_or_create_session()
-        if s._ready and s.ssh_ro:
-            print(f"[tmate] ✓ Session ready", flush=True)
-            print(f"[tmate] SSH (read-only): {s.ssh_ro}", flush=True)
+        if s._ready:
+            print(f"[tmate] ✓ Ready. SSH (read-only): {s.ssh_ro}", flush=True)
         else:
-            print("[tmate] ✗ No URL received. Check internet access to tmate.io", flush=True)
+            print("[tmate] ✗ Session not ready", flush=True)
     except Exception as e:
         print(f"[tmate] ✗ Error: {e}", flush=True)
 
@@ -73,7 +72,7 @@ async def health():
 @app.get("/tmate-status")
 async def tmate_status(_=Depends(basic_auth)):
     s = shell_manager._session
-    if s and s._ready:
+    if s and s._ready and s.ssh_ro:
         return {"ready": True, "ssh_ro": s.ssh_ro}
     return {"ready": False, "ssh_ro": None}
 
@@ -84,7 +83,7 @@ async def index(request: Request, _=Depends(basic_auth)):
     t = get_translations(locale)
     chats = storage.list_chats()
     s = shell_manager._session
-    ssh_ro = s.ssh_ro if (s and s._ready) else ""
+    ssh_ro = (s.ssh_ro or "") if (s and s._ready) else ""
     return templates.TemplateResponse("index.html", {
         "request": request,
         "t": t,
