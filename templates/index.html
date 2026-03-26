@@ -143,28 +143,54 @@ function updatePreview(id,text){const it=document.getElementById('chat-item-'+id
 
 async function sendMessage(){
   if(!currentChatId)await newChat();
-  const inp=document.getElementById('chatInput');const txt=inp.value.trim();if(!txt||isThinking)return;
+  const inp=document.getElementById('chatInput');
+  const txt=inp.value.trim();
+  if(!txt||isThinking)return;
   inp.value='';autoResize(inp);
-  appendMsg('user',txt,[]);setThinking(true);updatePreview(currentChatId,txt);
+  appendMsg('user',txt,[]);
+  setThinking(true);
+  updatePreview(currentChatId,txt);
+
+  // Step 1: POST message → get task_id immediately (fast, no timeout)
+  let taskId;
   try{
-    const r = await fetch('/chats/'+currentChatId+'/message', {
+    const r=await fetch('/chats/'+currentChatId+'/message',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({message:txt})
     });
-    const rawText = await r.text();
-    let data;
-    try { data = JSON.parse(rawText); }
-    catch(_) {
-      setThinking(false);
-      if(rawText.trim().startsWith('<')) appendErr('Gateway timeout — proxy closed the connection. Try a shorter request.');
-      else appendErr('Bad response: ' + rawText.substring(0, 100));
-      return;
+    if(!r.ok){
+      const e=await r.json().catch(()=>({detail:'Request failed'}));
+      setThinking(false);appendErr(e.detail||'Error');return;
     }
-    if(!r.ok){ setThinking(false); appendErr(data.detail || T.error); return; }
-    setThinking(false);
-    appendMsg('assistant', data.reply, data.tool_uses || []);
-  }catch(e){setThinking(false);appendErr(e.message);}
+    const d=await r.json();
+    taskId=d.task_id;
+  }catch(e){setThinking(false);appendErr(e.message);return;}
+
+  // Step 2: Poll /tasks/{task_id} every 2s until done
+  let attempts=0;
+  const maxAttempts=180; // 6 minutes max
+  const poll=async()=>{
+    attempts++;
+    if(attempts>maxAttempts){setThinking(false);appendErr('Timeout: Claude took too long');return;}
+    try{
+      const r=await fetch('/tasks/'+taskId);
+      if(!r.ok){setThinking(false);appendErr('Task not found');return;}
+      const d=await r.json();
+      if(d.status==='running'){
+        setTimeout(poll,2000);
+        return;
+      }
+      setThinking(false);
+      if(d.status==='error'){appendErr(d.error||'Unknown error');return;}
+      if(d.status==='done'){appendMsg('assistant',d.reply,d.tool_uses||[]);return;}
+    }catch(e){
+      // Network hiccup — keep polling
+      if(attempts<maxAttempts)setTimeout(poll,2000);
+      else{setThinking(false);appendErr(e.message);}
+    }
+  };
+  setTimeout(poll,1000);
 }
 
 function appendMsg(role, content, tools){
