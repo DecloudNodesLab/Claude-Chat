@@ -535,7 +535,15 @@ function connectShell(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   shellWs=new WebSocket(`${proto}//${location.host}/ws/shell/default`);
   shellWs.binaryType='arraybuffer';
-  shellWs.onopen=()=>{st.textContent=T.shell_connected;st.className='shell-status connected';shellWs.send(JSON.stringify({type:'resize',rows:50,cols:220}));};
+  shellWs.onopen=()=>{
+    st.textContent=T.shell_connected;st.className='shell-status connected';
+    shellWs.send(JSON.stringify({type:'resize',rows:50,cols:220}));
+    // Ctrl+L after bash starts = clear + redraw prompt (no history pollution)
+    setTimeout(()=>{
+      if(shellWs&&shellWs.readyState===WebSocket.OPEN)
+        shellWs.send(new TextEncoder().encode('\x0c'));
+    }, 800);
+  };
   shellWs.onmessage=(event)=>{
     if(typeof event.data==='string'){try{const m=JSON.parse(event.data);if(m.type==='connected')return;}catch(e){}return;}
     if(event.data instanceof ArrayBuffer)TERM.write(new Uint8Array(event.data));
