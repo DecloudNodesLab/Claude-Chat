@@ -66,9 +66,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .message-body code{font-family:var(--font-mono);font-size:12px;background:rgba(255,255,255,.07);padding:1px 4px;border-radius:3px;}
 .message-body pre{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin:6px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12px;}
 .message-body pre code{background:none;padding:0;}
-.tool-block{margin-top:6px;padding:8px 12px;background:#1a2520;border:1px solid rgba(74,222,128,.15);border-radius:var(--radius);font-family:var(--font-mono);font-size:11px;color:var(--text2);}
-.tool-block-header{color:var(--warning);font-size:10px;margin-bottom:4px;}
-.tool-block-result{max-height:120px;overflow-y:auto;}
+/* Tool indicator — compact, no output */
+.tool-indicator{display:inline-flex;align-items:center;gap:5px;margin-top:5px;padding:3px 8px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:4px;font-size:11px;color:var(--warning);font-family:var(--font-mono);}
 .thinking{display:flex;align-items:center;gap:8px;color:var(--text3);font-size:13px;padding:8px 0;}
 .dots{display:flex;gap:3px;}
 .dots span{width:5px;height:5px;border-radius:50%;background:var(--accent);animation:blink 1.2s infinite;}
@@ -91,11 +90,18 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .shell-status{font-size:11px;padding:2px 8px;border-radius:4px;}
 .shell-status.connected{color:var(--success);background:rgba(74,222,128,.1);}
 .shell-status.disconnected{color:var(--error);background:rgba(248,113,113,.1);}
-.shell-reconnect-btn{margin-left:auto;padding:3px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer;font-size:11px;transition:all .15s;}
-.shell-reconnect-btn:hover{border-color:var(--accent);color:var(--accent);}
-/* Terminal */
-.term-viewport{flex:1;overflow:hidden;background:#0a0c12;position:relative;}
-#termCanvas{display:block;width:100%;height:100%;}
+.shell-btn{padding:3px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer;font-size:11px;transition:all .15s;}
+.shell-btn:hover{border-color:var(--accent);color:var(--accent);}
+.shell-btn.copied{border-color:var(--success);color:var(--success);}
+/* Terminal viewport: scrollable div containing canvas */
+.term-viewport{flex:1;overflow-y:scroll;overflow-x:hidden;background:#0a0c12;position:relative;cursor:text;}
+.term-viewport::-webkit-scrollbar{width:8px;}
+.term-viewport::-webkit-scrollbar-track{background:#0a0c12;}
+.term-viewport::-webkit-scrollbar-thumb{background:#2d3250;border-radius:4px;}
+.term-viewport::-webkit-scrollbar-thumb:hover{background:#64748b;}
+#termCanvas{display:block;}
+/* Selection overlay */
+.term-selection{position:absolute;background:rgba(124,141,255,0.3);pointer-events:none;}
 ::-webkit-scrollbar{width:6px;height:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
@@ -172,9 +178,10 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
       <div class="shell-header">
         <div class="shell-title">{{ t.shell_section }}</div>
         <div class="shell-status disconnected" id="shellStatus">{{ t.shell_connecting }}</div>
-        <button class="shell-reconnect-btn" onclick="reconnectShell()">{{ t.reconnect }}</button>
+        <button class="shell-btn" id="copyBtn" onclick="copySelection()" style="margin-left:auto" title="Copy selected text (Ctrl+Shift+C)">Copy</button>
+        <button class="shell-btn" onclick="reconnectShell()">{{ t.reconnect }}</button>
       </div>
-      <div class="term-viewport" id="termViewport">
+      <div class="term-viewport" id="termViewport" tabindex="0">
         <canvas id="termCanvas"></canvas>
       </div>
     </div>
@@ -186,29 +193,20 @@ const T = {{ t | tojson }};
 let currentChatId = null;
 let isThinking = false;
 
-async function setLocale(loc) {
-  await fetch('/locale/'+loc,{method:'POST'});
-  location.reload();
-}
+async function setLocale(loc){await fetch('/locale/'+loc,{method:'POST'});location.reload();}
 
-function onFileChosen() {
-  const inp=document.getElementById('fileInput');
-  const btn=document.getElementById('uploadBtn');
-  const nm=document.getElementById('fileName');
-  if(inp.files.length>0){nm.textContent=Array.from(inp.files).map(f=>f.name).join(', ');btn.disabled=false;}
-  else{nm.textContent=T.no_file_chosen;btn.disabled=true;}
+function onFileChosen(){
+  const i=document.getElementById('fileInput'),b=document.getElementById('uploadBtn'),n=document.getElementById('fileName');
+  if(i.files.length>0){n.textContent=Array.from(i.files).map(f=>f.name).join(', ');b.disabled=false;}
+  else{n.textContent=T.no_file_chosen;b.disabled=true;}
 }
-async function uploadFile() {
-  const inp=document.getElementById('fileInput');
-  const btn=document.getElementById('uploadBtn');
-  const st=document.getElementById('uploadStatus');
+async function uploadFile(){
+  const inp=document.getElementById('fileInput'),btn=document.getElementById('uploadBtn'),st=document.getElementById('uploadStatus');
   if(!inp.files.length)return;
   btn.disabled=true;btn.textContent=T.uploading;st.style.display='none';
   const errors=[],ok=[];
-  for(const f of inp.files){
-    const fd=new FormData();fd.append('file',f);
-    try{const r=await fetch('/upload',{method:'POST',body:fd});
-      if(r.ok)ok.push(f.name);else{const d=await r.json();errors.push(f.name+': '+(d.detail||T.upload_error));}}
+  for(const f of inp.files){const fd=new FormData();fd.append('file',f);
+    try{const r=await fetch('/upload',{method:'POST',body:fd});if(r.ok)ok.push(f.name);else{const d=await r.json();errors.push(f.name+': '+(d.detail||T.upload_error));}}
     catch(e){errors.push(f.name+': '+e.message);}
   }
   btn.disabled=false;btn.textContent=T.upload_button;st.style.display='inline';
@@ -218,58 +216,108 @@ async function uploadFile() {
   setTimeout(()=>{st.style.display='none';},4000);
 }
 
-async function newChat() {
-  const r=await fetch('/chats',{method:'POST'});
-  const d=await r.json();
-  currentChatId=d.id;
-  renderMessages([]);
-  addChatItem(d.id,T.new_chat,true);
+async function newChat(){
+  const r=await fetch('/chats',{method:'POST'});const d=await r.json();
+  currentChatId=d.id;renderMessages([]);addChatItem(d.id,T.new_chat,true);
   document.getElementById('chatInput').focus();
 }
-async function loadChat(id) {
+async function loadChat(id){
   const r=await fetch('/chats/'+id);if(!r.ok)return;
   const d=await r.json();currentChatId=id;renderMessages(d.messages);
   document.querySelectorAll('.chat-item').forEach(e=>e.classList.remove('active'));
   const it=document.getElementById('chat-item-'+id);if(it)it.classList.add('active');
 }
-async function deleteChat(e,id) {
-  e.stopPropagation();
-  await fetch('/chats/'+id,{method:'DELETE'});
+async function deleteChat(e,id){
+  e.stopPropagation();await fetch('/chats/'+id,{method:'DELETE'});
   const it=document.getElementById('chat-item-'+id);if(it)it.remove();
   if(currentChatId===id){currentChatId=null;document.getElementById('messages').innerHTML='<div class="messages-placeholder">'+T.select_chat+'</div>';}
   if(!document.querySelector('.chat-item')){const l=document.getElementById('chatList');const d=document.createElement('div');d.className='no-chats';d.id='noChats';d.textContent=T.no_chats;l.appendChild(d);}
 }
-function addChatItem(id,preview,active) {
+function addChatItem(id,preview,active){
   const nc=document.getElementById('noChats');if(nc)nc.remove();
   document.querySelectorAll('.chat-item').forEach(e=>e.classList.remove('active'));
-  const l=document.getElementById('chatList');
-  const it=document.createElement('div');
+  const l=document.getElementById('chatList');const it=document.createElement('div');
   it.className='chat-item'+(active?' active':'');it.id='chat-item-'+id;it.onclick=()=>loadChat(id);
   it.innerHTML=`<div class="chat-item-preview">${esc(preview)}</div><button class="chat-item-delete" onclick="deleteChat(event,'${id}')" title="${T.delete_chat}">×</button>`;
   l.insertBefore(it,l.firstChild);
 }
 function updatePreview(id,text){const it=document.getElementById('chat-item-'+id);if(it){const el=it.querySelector('.chat-item-preview');if(el)el.textContent=text.substring(0,60)+(text.length>60?'..':'');}}
-async function sendMessage() {
+
+async function sendMessage(){
   if(!currentChatId)await newChat();
-  const inp=document.getElementById('chatInput');
-  const txt=inp.value.trim();if(!txt||isThinking)return;
+  const inp=document.getElementById('chatInput');const txt=inp.value.trim();if(!txt||isThinking)return;
   inp.value='';autoResize(inp);
   appendMsg('user',txt,[]);setThinking(true);updatePreview(currentChatId,txt);
   try{
-    const r=await fetch('/chats/'+currentChatId+'/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:txt})});
-    if(!r.ok){const e=await r.json();setThinking(false);appendErr(e.detail||T.error);return;}
-    const d=await r.json();setThinking(false);appendMsg('assistant',d.reply,d.tool_uses||[]);
+    const r = await fetch('/chats/'+currentChatId+'/message', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:txt})
+    });
+    if(!r.ok && !r.headers.get('content-type')?.includes('event-stream')){
+      const rawText = await r.text();
+      setThinking(false);
+      if(rawText.trim().startsWith('<')) appendErr('Gateway timeout — Claude is thinking too long. Try again or simplify the request.');
+      else { try{ const e=JSON.parse(rawText); appendErr(e.detail||T.error); } catch(_){ appendErr(rawText.substring(0,120)); } }
+      return;
+    }
+    // Read SSE stream — pings keep connection alive, last line is the result
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, {stream:true});
+      const lines = buffer.split('
+');
+      buffer = lines.pop(); // keep incomplete line
+      for(const line of lines){
+        if(line.startsWith('data: ')){
+          const jsonStr = line.slice(6).trim();
+          if(!jsonStr) continue;
+          let data;
+          try{ data = JSON.parse(jsonStr); } catch(_){ continue; }
+          setThinking(false);
+          if(data.error){ appendErr(data.error); return; }
+          appendMsg('assistant', data.reply, data.tool_uses||[]);
+          return;
+        }
+        // lines starting with ': ' are keep-alive pings — ignore
+      }
+    }
+    setThinking(false);
   }catch(e){setThinking(false);appendErr(e.message);}
 }
-function appendMsg(role,content,tools){
+
+function appendMsg(role, content, tools){
   const ph=document.getElementById('chatPlaceholder');if(ph)ph.remove();
   const msgs=document.getElementById('messages');
   const div=document.createElement('div');div.className='message '+role;
   const label=role==='user'?T.you:T.assistant;
   div.innerHTML=`<div class="message-header"><span class="message-role ${role}">${label}</span></div><div class="message-body">${fmt(content)}</div>`;
-  if(tools&&tools.length){for(const t of tools){const tb=document.createElement('div');tb.className='tool-block';const inp=JSON.stringify(t.input||{},null,2);const res=t.error?'⚠ '+t.error:(t.result||'');tb.innerHTML=`<div class="tool-block-header">⚙ ${esc(T.tool_used)}: ${esc(t.tool)}</div><pre>${esc(inp)}</pre><div class="tool-block-result"><pre>${esc(res.substring(0,600))}${res.length>600?'…':''}</pre></div>`;div.appendChild(tb);}}
+
+  // Show tool indicators — compact, no output in chat
+  if(tools && tools.length){
+    const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
+    for(const t of tools){
+      const badge=document.createElement('span');
+      badge.className='tool-indicator';
+      // Show command for run_command, just tool name for others
+      if(t.tool==='run_command' && t.input && t.input.command){
+        const cmd=t.input.command.length>60 ? t.input.command.substring(0,60)+'…' : t.input.command;
+        badge.textContent='⚙ $ '+cmd;
+      } else {
+        badge.textContent='⚙ '+t.tool+(t.error?' ✗':'');
+      }
+      if(t.error) badge.style.borderColor='rgba(248,113,113,.3)';
+      wrap.appendChild(badge);
+    }
+    div.appendChild(wrap);
+  }
   msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;
 }
+
 function appendErr(t){const msgs=document.getElementById('messages');const d=document.createElement('div');d.style.cssText='color:var(--error);font-size:12px;padding:6px 0;';d.textContent='⚠ '+t;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;}
 function setThinking(v){isThinking=v;const btn=document.getElementById('sendBtn');btn.disabled=v;btn.textContent=v?'...':T.send;const msgs=document.getElementById('messages');const ex=document.getElementById('thinkingIndicator');if(v&&!ex){const d=document.createElement('div');d.className='thinking';d.id='thinkingIndicator';d.innerHTML=`<div class="dots"><span></span><span></span><span></span></div><span>${T.thinking}</span>`;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;}else if(!v&&ex)ex.remove();}
 function renderMessages(msgs){const c=document.getElementById('messages');c.innerHTML='';if(!msgs||!msgs.length){c.innerHTML='<div class="messages-placeholder">'+T.select_chat+'</div>';return;}for(const m of msgs)if(m.role==='user'||m.role==='assistant')appendMsg(m.role,m.content,[]);}
@@ -278,344 +326,456 @@ function esc(t){if(typeof t!=='string')t=String(t||'');return t.replace(/&/g,'&a
 function onChatKeydown(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}}
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,140)+'px';}
 
-// ─── Canvas Terminal (no external deps) ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// Canvas VT100 Terminal with scrollback, text selection, copy
+// ══════════════════════════════════════════════════════════════════════════════
 const TERM = (() => {
-  const COLS = 220, ROWS = 50;
+  const COLS = 220, ROWS = 50, SCROLLBACK = 2000;
   const CHAR_W = 9, CHAR_H = 16;
+
   let canvas, ctx, vp;
-  // Screen buffer: array of ROWS arrays of {ch, fg, bg, bold}
-  let screen = [];
-  let cx = 0, cy = 0; // cursor position
+  let scrollbuf = []; // all lines ever (scrollback + screen)
+  let screen = [];    // ROWS lines currently visible
+  let cx = 0, cy = 0;
   let fgColor = '#e2e8f0', bgColor = '#0a0c12', bold = false;
-  let scrollTop = 0, scrollBot = ROWS - 1;
-  let parseState = 'normal';
-  let escBuf = '';
-  // Saved cursor
+  let scrollRegTop = 0, scrollRegBot = ROWS - 1;
+  let parseState = 'normal', escBuf = '';
   let savedCx = 0, savedCy = 0;
+  // viewport scroll offset (lines from bottom)
+  let viewOffset = 0; // 0 = showing bottom; positive = scrolled up
+
+  // Selection state
+  let selStart = null, selEnd = null, selecting = false;
+  let mouseDownCell = null;
 
   const ANSI_COLORS = [
     '#1e2130','#f87171','#4ade80','#fbbf24','#7c8dff','#c084fc','#22d3ee','#e2e8f0',
     '#64748b','#fca5a5','#86efac','#fde68a','#a5b4fc','#d8b4fe','#67e8f9','#f8fafc'
   ];
 
-  function initScreen() {
-    screen = [];
-    for (let r = 0; r < ROWS; r++) {
-      screen[r] = [];
-      for (let c = 0; c < COLS; c++)
-        screen[r][c] = {ch:' ', fg:'#e2e8f0', bg:'#0a0c12', bold:false};
-    }
+  function blankRow(){const r=[];for(let c=0;c<COLS;c++)r[c]={ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};return r;}
+
+  function initScreen(){
+    screen=[];for(let r=0;r<ROWS;r++)screen[r]=blankRow();
+    scrollbuf=[];for(let r=0;r<ROWS;r++)scrollbuf.push(screen[r]);
+    cx=0;cy=0;scrollRegTop=0;scrollRegBot=ROWS-1;
   }
 
-  function init(canvasEl, viewportEl) {
-    canvas = canvasEl; vp = viewportEl; ctx = canvas.getContext('2d');
+  function init(canvasEl, viewportEl){
+    canvas=canvasEl; vp=viewportEl; ctx=canvas.getContext('2d');
     initScreen();
-    resize();
-    window.addEventListener('resize', resize);
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    // Mouse events for selection
+    vp.addEventListener('mousedown', onMouseDown);
+    vp.addEventListener('mousemove', onMouseMove);
+    vp.addEventListener('mouseup', onMouseUp);
+    vp.addEventListener('contextmenu', onContextMenu);
+
+    // Keyboard
+    vp.addEventListener('keydown', onKey);
+
+    // Wheel scroll
+    vp.addEventListener('wheel', onWheel, {passive:false});
+
+    setInterval(()=>{blinkState=!blinkState; renderCursorOnly();}, 530);
     render();
-    startBlink();
   }
 
-  function resize() {
-    const w = vp.clientWidth, h = vp.clientHeight;
-    canvas.width = w; canvas.height = h;
+  function resizeCanvas(){
+    canvas.width = vp.clientWidth || 800;
+    canvas.height = ROWS * CHAR_H;
+    // Keep scroll position at bottom when not scrolled up
+    if(viewOffset === 0) scrollToBottom();
     render();
   }
 
-  let blinkOn = true, blinkTimer = null;
-  function startBlink() {
-    blinkTimer = setInterval(() => { blinkOn = !blinkOn; renderCursor(); }, 530);
+  function scrollToBottom(){
+    vp.scrollTop = vp.scrollHeight;
   }
 
-  function renderCursor() {
-    if (!ctx) return;
-    const offX = Math.floor((canvas.width - COLS * CHAR_W) / 2);
-    const offY = 0;
-    // Restore cell under cursor
-    const cell = screen[cy] ? screen[cy][cx] : null;
-    if (!cell) return;
-    drawCell(cx, cy, cell, offX, offY);
-    // Draw cursor on top
-    if (blinkOn) {
-      ctx.fillStyle = '#7c8dff';
-      ctx.fillRect(offX + cx * CHAR_W, offY + cy * CHAR_H, CHAR_W, CHAR_H);
-      ctx.fillStyle = '#0a0c12';
-      ctx.font = (cell.bold ? 'bold ' : '') + CHAR_H + 'px ' + getComputedStyle(document.body).getPropertyValue('--font-mono');
-      ctx.fillText(cell.ch, offX + cx * CHAR_W, offY + cy * CHAR_H + CHAR_H - 3);
+  // Convert pixel coords to cell coords
+  function pixToCell(px, py){
+    const rect = canvas.getBoundingClientRect();
+    const x = px - rect.left;
+    const y = py - rect.top;
+    const col = Math.max(0, Math.min(COLS-1, Math.floor(x / CHAR_W)));
+    const row = Math.max(0, Math.min(ROWS-1, Math.floor(y / CHAR_H)));
+    return {row, col};
+  }
+
+  function onMouseDown(e){
+    if(e.button !== 0) return;
+    vp.focus();
+    const cell = pixToCell(e.clientX, e.clientY);
+    mouseDownCell = cell;
+    selStart = {...cell}; selEnd = {...cell};
+    selecting = true;
+    render();
+  }
+  function onMouseMove(e){
+    if(!selecting) return;
+    const cell = pixToCell(e.clientX, e.clientY);
+    selEnd = {...cell};
+    render();
+  }
+  function onMouseUp(e){
+    if(!selecting) return;
+    selecting = false;
+    const cell = pixToCell(e.clientX, e.clientY);
+    selEnd = {...cell};
+    // If tiny movement = click, clear selection
+    if(selStart && Math.abs(selStart.col-selEnd.col)<1 && Math.abs(selStart.row-selEnd.row)<1){
+      selStart=null; selEnd=null;
     }
+    render();
+  }
+  function onContextMenu(e){
+    e.preventDefault();
+    copySelection();
   }
 
-  function drawCell(c, r, cell, offX, offY) {
-    ctx.fillStyle = cell.bg;
-    ctx.fillRect(offX + c * CHAR_W, offY + r * CHAR_H, CHAR_W, CHAR_H);
-    if (cell.ch !== ' ') {
-      ctx.fillStyle = cell.fg;
-      ctx.font = (cell.bold ? 'bold ' : '') + CHAR_H + 'px monospace';
-      ctx.fillText(cell.ch, offX + c * CHAR_W, offY + r * CHAR_H + CHAR_H - 3);
+  function onWheel(e){
+    e.preventDefault();
+    const lines = e.deltaMode === 1 ? e.deltaY*3 : Math.round(e.deltaY / CHAR_H);
+    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
+    viewOffset = Math.max(0, Math.min(maxOffset, viewOffset + lines));
+    // Sync scroll container
+    vp.scrollTop = (maxOffset - viewOffset) * CHAR_H;
+    render();
+  }
+
+  function getSelectedText(){
+    if(!selStart || !selEnd) return '';
+    let r0=selStart.row, c0=selStart.col, r1=selEnd.row, c1=selEnd.col;
+    if(r0>r1||(r0===r1&&c0>c1)){[r0,r1]=[r1,r0];[c0,c1]=[c1,c0];}
+    const viewStart = Math.max(0, scrollbuf.length - ROWS - viewOffset);
+    let lines=[];
+    for(let r=r0;r<=r1;r++){
+      const bufRow = viewStart + r;
+      const row = bufRow < scrollbuf.length ? scrollbuf[bufRow] : blankRow();
+      const fc = r===r0?c0:0;
+      const tc = r===r1?c1+1:COLS;
+      let line='';
+      for(let c=fc;c<tc;c++) line += (row[c]?row[c].ch:' ');
+      lines.push(line.trimEnd());
     }
+    return lines.join('\n');
   }
 
-  function render() {
-    if (!ctx) return;
-    const offX = Math.floor((canvas.width - COLS * CHAR_W) / 2);
-    const offY = 0;
-    ctx.fillStyle = '#0a0c12';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    for (let r = 0; r < ROWS && r * CHAR_H < canvas.height; r++) {
-      for (let c = 0; c < COLS && c * CHAR_W < canvas.width; c++) {
-        drawCell(c, r, screen[r][c], offX, offY);
+  function copySelection(){
+    const text = getSelectedText();
+    if(!text) return;
+    navigator.clipboard.writeText(text).then(()=>{
+      const btn=document.getElementById('copyBtn');
+      if(btn){btn.textContent='✓ Copied';btn.classList.add('copied');setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('copied');},1500);}
+    }).catch(()=>{
+      // Fallback: textarea trick
+      const ta=document.createElement('textarea');ta.value=text;
+      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+    });
+  }
+
+  // Expose copySelection globally
+  window._termCopy = copySelection;
+
+  let blinkState = true;
+
+  function cellSelected(r, c){
+    if(!selStart||!selEnd) return false;
+    let r0=selStart.row,c0=selStart.col,r1=selEnd.row,c1=selEnd.col;
+    if(r0>r1||(r0===r1&&c0>c1)){[r0,r1]=[r1,r0];[c0,c1]=[c1,c0];}
+    if(r<r0||r>r1) return false;
+    if(r0===r1) return c>=c0&&c<=c1;
+    if(r===r0) return c>=c0;
+    if(r===r1) return c<=c1;
+    return true;
+  }
+
+  function render(){
+    if(!ctx) return;
+    ctx.fillStyle='#0a0c12';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
+    const viewStart = Math.max(0, scrollbuf.length - ROWS - viewOffset);
+
+    for(let r=0;r<ROWS;r++){
+      const bufRow = viewStart + r;
+      const row = bufRow < scrollbuf.length ? scrollbuf[bufRow] : null;
+      if(!row) continue;
+      for(let c=0;c<COLS&&c*CHAR_W<canvas.width;c++){
+        const cell = row[c] || {ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};
+        const selected = cellSelected(r,c);
+        ctx.fillStyle = selected ? 'rgba(124,141,255,0.35)' : cell.bg;
+        ctx.fillRect(c*CHAR_W, r*CHAR_H, CHAR_W, CHAR_H);
+        if(selected) ctx.fillStyle = '#fff';
+        else ctx.fillStyle = cell.fg;
+        if(cell.ch !== ' '){
+          ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';
+          ctx.fillText(cell.ch, c*CHAR_W, r*CHAR_H+CHAR_H-3);
+        }
       }
     }
-    renderCursor();
+    // Cursor (only when at bottom / not scrolled up)
+    if(viewOffset===0 && blinkState){
+      ctx.fillStyle='#7c8dff';
+      ctx.fillRect(cx*CHAR_W, cy*CHAR_H, CHAR_W, CHAR_H);
+      const cell=screen[cy]?screen[cy][cx]:null;
+      if(cell&&cell.ch!==' '){
+        ctx.fillStyle='#0a0c12';
+        ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';
+        ctx.fillText(cell.ch, cx*CHAR_W, cy*CHAR_H+CHAR_H-3);
+      }
+    }
+    updateScrollHeight();
   }
 
-  function setCell(c, r, ch) {
-    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
-    screen[r][c] = {ch, fg: fgColor, bg: bgColor, bold};
+  let renderReq=null;
+  function scheduleRender(){
+    if(renderReq) return;
+    renderReq=requestAnimationFrame(()=>{renderReq=null;render();});
   }
 
-  function scrollUp() {
-    // Scroll region up by 1
-    for (let r = scrollTop; r < scrollBot; r++) screen[r] = screen[r+1] ? [...screen[r+1]] : blankRow();
-    screen[scrollBot] = blankRow();
+  function renderCursorOnly(){
+    if(viewOffset!==0) return;
+    if(!ctx) return;
+    // Erase old cursor area then redraw cell + cursor
+    const cell=screen[cy]?screen[cy][cx]:{ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};
+    ctx.fillStyle=cell.bg;ctx.fillRect(cx*CHAR_W,cy*CHAR_H,CHAR_W,CHAR_H);
+    if(blinkState){
+      ctx.fillStyle='#7c8dff';ctx.fillRect(cx*CHAR_W,cy*CHAR_H,CHAR_W,CHAR_H);
+      if(cell.ch!==' '){ctx.fillStyle='#0a0c12';ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';ctx.fillText(cell.ch,cx*CHAR_W,cy*CHAR_H+CHAR_H-3);}
+    } else {
+      if(cell.ch!==' '){ctx.fillStyle=cell.fg;ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';ctx.fillText(cell.ch,cx*CHAR_W,cy*CHAR_H+CHAR_H-3);}
+    }
   }
 
-  function scrollDown() {
-    for (let r = scrollBot; r > scrollTop; r--) screen[r] = screen[r-1] ? [...screen[r-1]] : blankRow();
-    screen[scrollTop] = blankRow();
+  function updateScrollHeight(){
+    // Make canvas tall enough for scrollback
+    const totalH = scrollbuf.length * CHAR_H;
+    if(canvas.height !== totalH){
+      // Don't resize canvas (would clear it), instead manage vp scroll
+    }
+    // Keep vp scrolled to bottom if viewOffset==0
+    if(viewOffset===0){
+      vp.scrollTop = vp.scrollHeight;
+    }
   }
 
-  function blankRow() {
-    const row = [];
-    for (let c = 0; c < COLS; c++) row[c] = {ch:' ', fg:'#e2e8f0', bg:'#0a0c12', bold:false};
-    return row;
+  // ── Terminal logic ───────────────────────────────────────────────────────
+  function setCell(c,r,ch){
+    if(r<0||r>=ROWS||c<0||c>=COLS) return;
+    screen[r][c]={ch,fg:fgColor,bg:bgColor,bold};
+    // Sync to scrollbuf
+    const bufIdx = scrollbuf.length - ROWS + r;
+    if(bufIdx>=0) scrollbuf[bufIdx]=screen[r];
   }
 
-  function newline() {
-    if (cy >= scrollBot) scrollUp();
+  function pushScrollback(){
+    // Add a new blank line at bottom of scrollbuf, trim if over limit
+    const newLine = blankRow();
+    scrollbuf.push(newLine);
+    if(scrollbuf.length > ROWS + SCROLLBACK){
+      scrollbuf.shift();
+    }
+    // Rebuild screen reference from scrollbuf tail
+    for(let r=0;r<ROWS;r++){
+      const bi = scrollbuf.length - ROWS + r;
+      if(bi>=0) screen[r]=scrollbuf[bi]; else screen[r]=blankRow();
+    }
+  }
+
+  function scrollUpRegion(){
+    if(scrollRegTop===0 && scrollRegBot===ROWS-1){
+      // Full screen scroll — push to scrollback
+      pushScrollback();
+      screen[scrollRegBot]=blankRow();
+      scrollbuf[scrollbuf.length-1]=screen[scrollRegBot];
+    } else {
+      for(let r=scrollRegTop;r<scrollRegBot;r++) screen[r]=screen[r+1]?[...screen[r+1]]:blankRow();
+      screen[scrollRegBot]=blankRow();
+      // Sync scrollbuf
+      for(let r=scrollRegTop;r<=scrollRegBot;r++){const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}
+    }
+  }
+
+  function scrollDownRegion(){
+    for(let r=scrollRegBot;r>scrollRegTop;r--) screen[r]=screen[r-1]?[...screen[r-1]]:blankRow();
+    screen[scrollRegTop]=blankRow();
+    for(let r=scrollRegTop;r<=scrollRegBot;r++){const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}
+  }
+
+  function newline(){
+    if(cy>=scrollRegBot) scrollUpRegion();
     else cy++;
   }
 
-  function applyCSI(cmd, params) {
-    const p = (i, def=1) => (params[i] !== undefined && params[i] !== '' ? parseInt(params[i]) : def);
-    switch(cmd) {
-      case 'A': cy = Math.max(scrollTop, cy - p(0)); break;
-      case 'B': cy = Math.min(scrollBot, cy + p(0)); break;
-      case 'C': cx = Math.min(COLS-1, cx + p(0)); break;
-      case 'D': cx = Math.max(0, cx - p(0)); break;
-      case 'H': case 'f': cy = Math.min(ROWS-1, Math.max(0, p(0)-1)); cx = Math.min(COLS-1, Math.max(0, p(1,1)-1)); break;
-      case 'J':
-        const jm = p(0,0);
-        if (jm === 2 || jm === 3) { initScreen(); cx=0; cy=0; }
-        else if (jm === 0) { for(let r=cy;r<ROWS;r++) for(let c=(r===cy?cx:0);c<COLS;c++) setCell(c,r,' '); }
-        else if (jm === 1) { for(let r=0;r<=cy;r++) for(let c=0;c<=(r===cy?cx:COLS-1);c++) setCell(c,r,' '); }
-        break;
-      case 'K':
-        const km = p(0,0);
-        if (km === 0) for(let c=cx;c<COLS;c++) setCell(c,cy,' ');
-        else if (km === 1) for(let c=0;c<=cx;c++) setCell(c,cy,' ');
-        else if (km === 2) for(let c=0;c<COLS;c++) setCell(c,cy,' ');
-        break;
-      case 'L': for(let i=0;i<p(0);i++) scrollDown(); break;
-      case 'M': for(let i=0;i<p(0);i++) scrollUp(); break;
-      case 'P': { // delete chars
-        const n=p(0);
-        for(let c=cx;c<COLS-n;c++) screen[cy][c]=screen[cy][c+n]||{ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};
-        for(let c=COLS-n;c<COLS;c++) setCell(c,cy,' ');
-        break;
-      }
-      case 'S': for(let i=0;i<p(0);i++) scrollUp(); break;
-      case 'T': for(let i=0;i<p(0);i++) scrollDown(); break;
-      case 'd': cy = Math.min(ROWS-1, Math.max(0, p(0)-1)); break;
-      case 'G': cx = Math.min(COLS-1, Math.max(0, p(0)-1)); break;
-      case 'r': scrollTop=Math.max(0,p(0)-1); scrollBot=Math.min(ROWS-1,p(1,ROWS)-1); break;
+  function applyCSI(cmd, params){
+    const p=(i,d=1)=>params[i]!==undefined&&params[i]!==''?parseInt(params[i]):d;
+    switch(cmd){
+      case 'A': cy=Math.max(scrollRegTop,cy-p(0)); break;
+      case 'B': cy=Math.min(scrollRegBot,cy+p(0)); break;
+      case 'C': cx=Math.min(COLS-1,cx+p(0)); break;
+      case 'D': cx=Math.max(0,cx-p(0)); break;
+      case 'H': case 'f': cy=Math.min(ROWS-1,Math.max(0,p(0)-1)); cx=Math.min(COLS-1,Math.max(0,p(1,1)-1)); break;
+      case 'J':{const m=p(0,0);
+        if(m===2||m===3){for(let r=0;r<ROWS;r++){screen[r]=blankRow();const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}cx=0;cy=0;}
+        else if(m===0){for(let r=cy;r<ROWS;r++)for(let c=(r===cy?cx:0);c<COLS;c++)setCell(c,r,' ');}
+        else if(m===1){for(let r=0;r<=cy;r++)for(let c=0;c<=(r===cy?cx:COLS-1);c++)setCell(c,r,' ');}
+        break;}
+      case 'K':{const m=p(0,0);
+        if(m===0)for(let c=cx;c<COLS;c++)setCell(c,cy,' ');
+        else if(m===1)for(let c=0;c<=cx;c++)setCell(c,cy,' ');
+        else for(let c=0;c<COLS;c++)setCell(c,cy,' ');
+        break;}
+      case 'L': for(let i=0;i<p(0);i++) scrollDownRegion(); break;
+      case 'M': for(let i=0;i<p(0);i++) scrollUpRegion(); break;
+      case 'P':{const n=p(0);for(let c=cx;c<COLS-n;c++)screen[cy][c]=screen[cy][c+n]||blankRow()[0];for(let c=COLS-n;c<COLS;c++)setCell(c,cy,' ');break;}
+      case 'S': for(let i=0;i<p(0);i++) scrollUpRegion(); break;
+      case 'T': for(let i=0;i<p(0);i++) scrollDownRegion(); break;
+      case 'd': cy=Math.min(ROWS-1,Math.max(0,p(0)-1)); break;
+      case 'G': cx=Math.min(COLS-1,Math.max(0,p(0)-1)); break;
+      case 'r': scrollRegTop=Math.max(0,p(0)-1); scrollRegBot=Math.min(ROWS-1,p(1,ROWS)-1); break;
       case 's': savedCx=cx; savedCy=cy; break;
       case 'u': cx=savedCx; cy=savedCy; break;
-      case 'm': // SGR
-        if(params.length===0||params[0]===''){fgColor='#e2e8f0';bgColor='#0a0c12';bold=false;break;}
+      case 'm':{
+        if(!params.length||params[0]===''){fgColor='#e2e8f0';bgColor='#0a0c12';bold=false;break;}
         let i=0;
         while(i<params.length){
           const n=parseInt(params[i])||0;
           if(n===0){fgColor='#e2e8f0';bgColor='#0a0c12';bold=false;}
           else if(n===1)bold=true;
-          else if(n===22)bold=false;
+          else if(n===2||n===22)bold=false;
           else if(n>=30&&n<=37)fgColor=ANSI_COLORS[n-30];
           else if(n===39)fgColor='#e2e8f0';
           else if(n>=40&&n<=47)bgColor=ANSI_COLORS[n-40];
           else if(n===49)bgColor='#0a0c12';
           else if(n>=90&&n<=97)fgColor=ANSI_COLORS[n-90+8];
           else if(n>=100&&n<=107)bgColor=ANSI_COLORS[n-100+8];
-          else if(n===38||n===48){
-            const bright=n===38;
-            if(params[i+1]==='5'&&params[i+2]!==undefined){
-              const ci=parseInt(params[i+2]);
-              const color=ci<16?ANSI_COLORS[ci]:`#888`;
-              if(bright)fgColor=color;else bgColor=color;
-              i+=2;
-            } else if(params[i+1]==='2'&&params[i+4]!==undefined){
-              const rc=parseInt(params[i+2]),gc=parseInt(params[i+3]),bc=parseInt(params[i+4]);
-              const color=`rgb(${rc},${gc},${bc})`;
-              if(bright)fgColor=color;else bgColor=color;
-              i+=4;
-            }
+          else if((n===38||n===48)&&params[i+1]==='5'&&params[i+2]!==undefined){
+            const ci=parseInt(params[i+2]);const color=ci<16?ANSI_COLORS[ci]:'#888';
+            if(n===38)fgColor=color;else bgColor=color;i+=2;
+          } else if((n===38||n===48)&&params[i+1]==='2'&&params[i+4]!==undefined){
+            const color=`rgb(${params[i+2]},${params[i+3]},${params[i+4]})`;
+            if(n===38)fgColor=color;else bgColor=color;i+=4;
           }
           i++;
         }
-        break;
+        break;}
     }
   }
 
-  function write(data) {
-    // data is Uint8Array
-    const dec = new TextDecoder('utf-8', {fatal:false});
-    const str = dec.decode(data);
-    let dirty = false;
-    for (let i = 0; i < str.length; i++) {
-      const ch = str[i];
-      const code = str.charCodeAt(i);
-
-      if (parseState === 'escape') {
-        if (ch === '[') { parseState = 'csi'; escBuf = ''; continue; }
-        if (ch === ']') { parseState = 'osc'; escBuf = ''; continue; }
-        if (ch === 'M') { // reverse index
-          if (cy <= scrollTop) scrollDown(); else cy--;
-          parseState = 'normal'; continue;
-        }
-        if (ch === '7') { savedCx=cx; savedCy=cy; parseState='normal'; continue; }
-        if (ch === '8') { cx=savedCx; cy=savedCy; parseState='normal'; continue; }
-        if (ch === 'c') { initScreen(); cx=0; cy=0; parseState='normal'; continue; }
-        parseState = 'normal'; continue;
+  function write(data){
+    const str = new TextDecoder('utf-8',{fatal:false}).decode(data);
+    for(let i=0;i<str.length;i++){
+      const ch=str[i], code=str.charCodeAt(i);
+      if(parseState==='escape'){
+        if(ch==='['){parseState='csi';escBuf='';continue;}
+        if(ch===']'){parseState='osc';escBuf='';continue;}
+        if(ch==='M'){if(cy<=scrollRegTop)scrollDownRegion();else cy--;parseState='normal';continue;}
+        if(ch==='7'){savedCx=cx;savedCy=cy;parseState='normal';continue;}
+        if(ch==='8'){cx=savedCx;cy=savedCy;parseState='normal';continue;}
+        if(ch==='c'){for(let r=0;r<ROWS;r++){screen[r]=blankRow();const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}cx=0;cy=0;parseState='normal';continue;}
+        parseState='normal';continue;
       }
-
-      if (parseState === 'csi') {
-        if ((code >= 0x40 && code <= 0x7e)) {
-          const params = escBuf.split(';');
-          applyCSI(ch, params);
-          parseState = 'normal'; dirty = true;
-        } else {
-          escBuf += ch;
-        }
+      if(parseState==='csi'){
+        if(code>=0x40&&code<=0x7e){applyCSI(ch,escBuf.split(';'));parseState='normal';}
+        else escBuf+=ch;
         continue;
       }
-
-      if (parseState === 'osc') {
-        if (code === 7 || code === 27 || ch === '\x9c') parseState = 'normal';
-        // ignore OSC content (window title etc)
+      if(parseState==='osc'){
+        if(code===7||code===27||code===0x9c)parseState='normal';
         continue;
       }
-
-      // Normal mode
-      if (code === 27) { parseState = 'escape'; continue; }
-      if (code === 155) { parseState = 'csi'; escBuf = ''; continue; } // C1 CSI
-      if (ch === '\r') { cx = 0; dirty = true; continue; }
-      if (ch === '\n') { newline(); dirty = true; continue; }
-      if (ch === '\b') { if(cx>0)cx--; dirty = true; continue; }
-      if (ch === '\t') { cx = Math.min(COLS-1, Math.floor((cx+8)/8)*8); dirty = true; continue; }
-      if (ch === '\x07') continue; // bell
-      if (code < 32) continue; // other control chars
-
-      setCell(cx, cy, ch);
-      dirty = true;
-      cx++;
-      if (cx >= COLS) { cx = 0; newline(); }
+      if(code===27){parseState='escape';continue;}
+      if(code===155){parseState='csi';escBuf='';continue;}
+      if(ch==='\r'){cx=0;continue;}
+      if(ch==='\n'){newline();continue;}
+      if(ch==='\b'){if(cx>0)cx--;continue;}
+      if(ch==='\t'){cx=Math.min(COLS-1,Math.floor((cx+8)/8)*8);continue;}
+      if(ch==='\x07')continue;
+      if(code<32)continue;
+      setCell(cx,cy,ch);cx++;
+      if(cx>=COLS){cx=0;newline();}
     }
-    if (dirty) {
-      cancelAnimationFrame(renderReq);
-      renderReq = requestAnimationFrame(render);
-    }
+    scheduleRender();
+    // Auto-scroll to bottom on new output (if already at bottom)
+    if(viewOffset===0) setTimeout(scrollToBottom,0);
   }
 
-  let renderReq = null;
+  function onKey(e){
+    if(!shellWs||shellWs.readyState!==WebSocket.OPEN)return;
+    // Ctrl+Shift+C = copy
+    if(e.ctrlKey&&e.shiftKey&&e.key==='C'){e.preventDefault();copySelection();return;}
+    e.preventDefault();
+    let data='';
+    const k=e.key;
+    if(k==='Enter')data='\r';
+    else if(k==='Backspace')data='\x7f';
+    else if(k==='Tab')data='\t';
+    else if(k==='Escape')data='\x1b';
+    else if(k==='ArrowUp')data='\x1b[A';
+    else if(k==='ArrowDown')data='\x1b[B';
+    else if(k==='ArrowRight')data='\x1b[C';
+    else if(k==='ArrowLeft')data='\x1b[D';
+    else if(k==='Home')data='\x1b[H';
+    else if(k==='End')data='\x1b[F';
+    else if(k==='Delete')data='\x1b[3~';
+    else if(k==='PageUp')data='\x1b[5~';
+    else if(k==='PageDown')data='\x1b[6~';
+    else if(e.ctrlKey&&k.length===1){const c=k.toUpperCase().charCodeAt(0)-64;if(c>=0&&c<=31)data=String.fromCharCode(c);}
+    else if(k.length===1)data=k;
+    if(data)shellWs.send(new TextEncoder().encode(data));
+    // New input = scroll to bottom
+    viewOffset=0;scrollToBottom();
+  }
 
-  return { init, write, resize };
+  function resize(){
+    resizeCanvas();
+  }
+
+  return {init, write, resize, copy: copySelection};
 })();
+
+function copySelection(){ TERM.copy(); }
 
 // ─── WebSocket Shell ──────────────────────────────────────────────────────────
 let shellWs = null;
 let _reconnectTimer = null;
 
-function initTerminal() {
-  const canvas = document.getElementById('termCanvas');
-  const vp = document.getElementById('termViewport');
-  TERM.init(canvas, vp);
-
-  // Keyboard input
-  vp.setAttribute('tabindex', '0');
-  vp.addEventListener('click', () => vp.focus());
-  vp.addEventListener('keydown', onTermKey);
-
+function initTerminal(){
+  const canvas=document.getElementById('termCanvas');
+  const vp=document.getElementById('termViewport');
+  TERM.init(canvas,vp);
   connectShell();
 }
 
-function onTermKey(e) {
-  if (!shellWs || shellWs.readyState !== WebSocket.OPEN) return;
-  e.preventDefault();
-  let data = '';
-  const k = e.key;
-  if (k === 'Enter') data = '\r';
-  else if (k === 'Backspace') data = '\x7f';
-  else if (k === 'Tab') data = '\t';
-  else if (k === 'Escape') data = '\x1b';
-  else if (k === 'ArrowUp') data = '\x1b[A';
-  else if (k === 'ArrowDown') data = '\x1b[B';
-  else if (k === 'ArrowRight') data = '\x1b[C';
-  else if (k === 'ArrowLeft') data = '\x1b[D';
-  else if (k === 'Home') data = '\x1b[H';
-  else if (k === 'End') data = '\x1b[F';
-  else if (k === 'Delete') data = '\x1b[3~';
-  else if (k === 'PageUp') data = '\x1b[5~';
-  else if (k === 'PageDown') data = '\x1b[6~';
-  else if (e.ctrlKey && k.length === 1) {
-    const c = k.toUpperCase().charCodeAt(0) - 64;
-    if (c >= 0 && c <= 31) data = String.fromCharCode(c);
-  }
-  else if (k.length === 1) data = k;
-  if (data) shellWs.send(new TextEncoder().encode(data));
+function connectShell(){
+  if(_reconnectTimer){clearTimeout(_reconnectTimer);_reconnectTimer=null;}
+  if(shellWs){shellWs.onclose=null;try{shellWs.close();}catch(e){}shellWs=null;}
+  const st=document.getElementById('shellStatus');
+  st.textContent=T.shell_connecting; st.className='shell-status disconnected';
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  shellWs=new WebSocket(`${proto}//${location.host}/ws/shell/default`);
+  shellWs.binaryType='arraybuffer';
+  shellWs.onopen=()=>{
+    st.textContent=T.shell_connected; st.className='shell-status connected';
+    shellWs.send(JSON.stringify({type:'resize',rows:50,cols:220}));
+  };
+  shellWs.onmessage=(event)=>{
+    if(typeof event.data==='string'){try{const m=JSON.parse(event.data);if(m.type==='connected')return;}catch(e){}return;}
+    if(event.data instanceof ArrayBuffer) TERM.write(new Uint8Array(event.data));
+  };
+  shellWs.onerror=()=>{st.textContent=T.shell_disconnected;st.className='shell-status disconnected';};
+  shellWs.onclose=()=>{st.textContent=T.shell_disconnected;st.className='shell-status disconnected';_reconnectTimer=setTimeout(connectShell,3000);};
 }
 
-function connectShell() {
-  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
-  if (shellWs) { shellWs.onclose = null; try { shellWs.close(); } catch(e) {} shellWs = null; }
+function reconnectShell(){connectShell();}
 
-  const st = document.getElementById('shellStatus');
-  st.textContent = T.shell_connecting;
-  st.className = 'shell-status disconnected';
-
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  shellWs = new WebSocket(`${proto}//${location.host}/ws/shell/default`);
-  shellWs.binaryType = 'arraybuffer';
-
-  shellWs.onopen = () => {
-    st.textContent = T.shell_connected;
-    st.className = 'shell-status connected';
-    // Send terminal size
-    shellWs.send(JSON.stringify({type:'resize', rows:50, cols:220}));
-  };
-
-  shellWs.onmessage = (event) => {
-    if (typeof event.data === 'string') {
-      try { const m=JSON.parse(event.data); if(m.type==='connected') return; } catch(e){}
-      return;
-    }
-    if (event.data instanceof ArrayBuffer) {
-      TERM.write(new Uint8Array(event.data));
-    }
-  };
-
-  shellWs.onerror = (e) => { st.textContent = T.shell_disconnected; st.className = 'shell-status disconnected'; };
-  shellWs.onclose = (e) => {
-    st.textContent = T.shell_disconnected;
-    st.className = 'shell-status disconnected';
-    _reconnectTimer = setTimeout(connectShell, 3000);
-  };
-}
-
-function reconnectShell() { connectShell(); }
-
-// ─── Resize handle ────────────────────────────────────────────────────────────
-function initResizeHandle() {
-  const handle = document.getElementById('resizeHandle');
-  const shell = document.getElementById('shellSection');
+// ─── Resize handle ─────────────────────────────────────────────────────────
+function initResizeHandle(){
+  const handle=document.getElementById('resizeHandle'),shell=document.getElementById('shellSection');
   let sy=0,sh=0,drag=false;
   handle.addEventListener('mousedown',e=>{drag=true;sy=e.clientY;sh=shell.offsetHeight;document.body.style.userSelect='none';});
   document.addEventListener('mousemove',e=>{if(!drag)return;const h=Math.max(150,Math.min(sh+(sy-e.clientY),window.innerHeight*.7));shell.style.height=h+'px';shell.style.maxHeight='none';TERM.resize();});
@@ -623,10 +783,9 @@ function initResizeHandle() {
 }
 window.addEventListener('resize',()=>TERM.resize());
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  const first = document.querySelector('.chat-item');
-  if (first) loadChat(first.id.replace('chat-item-',''));
+document.addEventListener('DOMContentLoaded',()=>{
+  const first=document.querySelector('.chat-item');
+  if(first)loadChat(first.id.replace('chat-item-',''));
   initResizeHandle();
   initTerminal();
 });
