@@ -160,6 +160,7 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
                 workspace_dir=WORKSPACE_DIR,
                 shell_manager=shell_manager,
                 chat_id=chat_id,
+                data_dir=DATA_DIR,
             )
             messages.append({"role": "assistant", "content": reply})
             storage.save_chat(chat_id, messages)
@@ -260,6 +261,43 @@ async def upload_to_path(path: str = "", file: UploadFile = File(...), _=Depends
     data = await file.read()
     dest.write_bytes(data)
     return {"ok": True, "filename": filename, "size": len(data)}
+
+
+# ── Settings API ──────────────────────────────────────────────────────────────
+@app.get("/settings")
+async def get_settings(_=Depends(basic_auth)):
+    path = DATA_DIR / "settings.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"), "system_prompt": ""}
+
+
+@app.post("/settings")
+async def save_settings(request: Request, _=Depends(basic_auth)):
+    body = await request.json()
+    path = DATA_DIR / "settings.json"
+    # Merge with existing
+    existing = {}
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    existing.update({k: v for k, v in body.items() if k in ("model", "system_prompt")})
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True}
+
+
+@app.get("/models")
+async def list_models(_=Depends(basic_auth)):
+    """Return available Claude models with pricing."""
+    models = [
+        {"id": "claude-opus-4-6",           "name": "Claude Opus 4.6",    "input": 5.00,  "output": 25.00, "badge": "powerful",    "ctx": "1M"},
+        {"id": "claude-sonnet-4-6",          "name": "Claude Sonnet 4.6",  "input": 3.00,  "output": 15.00, "badge": "recommended", "ctx": "1M"},
+        {"id": "claude-opus-4-5-20251101",   "name": "Claude Opus 4.5",    "input": 5.00,  "output": 25.00, "badge": "powerful",    "ctx": "200K"},
+        {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5",  "input": 3.00,  "output": 15.00, "badge": "recommended", "ctx": "200K"},
+        {"id": "claude-haiku-4-5-20251001",  "name": "Claude Haiku 4.5",   "input": 1.00,  "output": 5.00,  "badge": "fast",        "ctx": "200K"},
+        {"id": "claude-opus-4-1-20250805",   "name": "Claude Opus 4.1",    "input": 15.00, "output": 75.00, "badge": "",            "ctx": "200K"},
+        {"id": "claude-sonnet-4-20250514",   "name": "Claude Sonnet 4",    "input": 3.00,  "output": 15.00, "badge": "",            "ctx": "200K"},
+    ]
+    return models
 
 
 @app.websocket("/ws/shell/{session_id}")
