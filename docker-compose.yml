@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  claude-workspace:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-opus-4-5}
+      - BASIC_AUTH_USERNAME=${BASIC_AUTH_USERNAME:-admin}
+      - BASIC_AUTH_PASSWORD=${BASIC_AUTH_PASSWORD:-changeme}
+      - DEFAULT_LOCALE=${DEFAULT_LOCALE:-en}
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+    volumes:
+      - workspace_data:/workspace
+      - app_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  workspace_data:
+  app_data:
