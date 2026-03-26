@@ -1,8 +1,9 @@
 import os
 import asyncio
 import json
-import threading
 import select
+import threading
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -34,40 +35,29 @@ class ShellSession:
             ["/bin/bash", "--login"],
             cwd=str(self.workspace_dir),
             env=env,
-            dimensions=(24, 80),
+            dimensions=(50, 220),
         )
         self._fd = self._proc.fd
         self._running = True
-
-        # Use select-based reader on the raw fd — more reliable than ptyprocess.read()
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
         print(f"[shell] started pid={self._proc.pid} fd={self._fd}", flush=True)
 
     def _reader(self):
-        """Read PTY fd using select — non-blocking, works in all envs."""
         fd = self._fd
-        print(f"[shell] reader thread started for fd={fd}", flush=True)
-        chunks_read = 0
         while self._running:
             try:
-                r, _, _ = select.select([fd], [], [], 0.1)
+                r, _, _ = select.select([fd], [], [], 0.05)
                 if r:
                     try:
                         chunk = os.read(fd, 4096)
-                    except OSError as e:
-                        print(f"[shell] read error: {e}", flush=True)
+                    except OSError:
                         break
                     if chunk:
-                        chunks_read += 1
-                        if chunks_read <= 3:
-                            print(f"[shell] got chunk #{chunks_read}: {len(chunk)} bytes", flush=True)
                         with self._buf_lock:
                             self._buf.append(chunk)
-            except (ValueError, OSError) as e:
-                print(f"[shell] select error: {e}", flush=True)
+            except (ValueError, OSError):
                 break
-        print(f"[shell] reader thread exited, total chunks: {chunks_read}", flush=True)
         self._running = False
 
     def drain(self) -> bytes:
@@ -77,6 +67,11 @@ class ShellSession:
             out = b"".join(self._buf)
             self._buf.clear()
             return out
+
+    def read_all_pending(self, wait_ms: int = 50) -> bytes:
+        """Drain buffer after a short wait for new data to arrive."""
+        time.sleep(wait_ms / 1000)
+        return self.drain()
 
     def write(self, data: bytes):
         if self._fd is not None and self._running:
@@ -93,6 +88,7 @@ class ShellSession:
                 pass
 
     def inject_command(self, command: str):
+        """Send command to PTY as if typed by user."""
         if not command.endswith("\n"):
             command += "\n"
         self.write(command.encode("utf-8", errors="replace"))
@@ -137,44 +133,45 @@ class ShellManager:
         session_id: str = "default",
         timeout: float = 30.0,
     ) -> dict:
+        """
+        Run command BY INJECTING INTO PTY so user sees full output in terminal.
+        Also capture output via subprocess for returning to Claude.
+        """
         s = self._sessions.get(session_id)
-        if s and s.is_alive():
-            s.inject_command(f"# [Claude] {command}")
 
+        # Show command in PTY terminal
+        if s and s.is_alive():
+            s.inject_command(command)
+
+        # Capture output separately for Claude's tool result
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self.workspace_dir),
                 env={**os.environ, "TERM": "dumb"},
             )
             try:
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
                 return {"stdout": "", "stderr": f"Timed out after {int(timeout)}s", "returncode": -1}
-            return {
-                "stdout": out.decode("utf-8", errors="replace")[:16000],
-                "stderr": err.decode("utf-8", errors="replace")[:4000],
-                "returncode": proc.returncode,
-            }
+
+            stdout = out.decode("utf-8", errors="replace")[:16000]
+            return {"stdout": stdout, "stderr": "", "returncode": proc.returncode}
+
         except Exception as e:
             return {"stdout": "", "stderr": str(e), "returncode": -1}
 
     async def handle_websocket(self, websocket: WebSocket, session_id: str):
         session = self.get_or_create_session(session_id)
-
         await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
-
-        # Trigger initial prompt by sending a resize
-        session.resize(24, 80)
-
-        pumped_total = 0
+        session.resize(50, 220)
 
         async def pump():
-            nonlocal session, pumped_total
+            nonlocal session
             while True:
                 await asyncio.sleep(0.02)
                 if not session.is_alive():
@@ -183,9 +180,6 @@ class ShellManager:
                     continue
                 chunk = session.drain()
                 if chunk:
-                    pumped_total += 1
-                    if pumped_total <= 3:
-                        print(f"[shell] pump sending chunk #{pumped_total}: {len(chunk)} bytes", flush=True)
                     try:
                         await websocket.send_bytes(chunk)
                     except Exception:
@@ -206,9 +200,7 @@ class ShellManager:
                     try:
                         obj = json.loads(raw)
                         if obj.get("type") == "resize":
-                            rows, cols = int(obj["rows"]), int(obj["cols"])
-                            session.resize(rows, cols)
-                            print(f"[shell] resize {cols}x{rows}", flush=True)
+                            session.resize(int(obj["rows"]), int(obj["cols"]))
                             continue
                     except Exception:
                         pass
