@@ -166,11 +166,10 @@ class ShellManager:
     async def handle_websocket(self, websocket: WebSocket, session_id: str):
         session = self.get_or_create_session(session_id)
 
-        # Send resize immediately to trigger bash prompt output
-        await asyncio.sleep(0.3)
-        session.resize(24, 80)
-
         await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
+
+        # Trigger initial prompt by sending a resize
+        session.resize(24, 80)
 
         pumped_total = 0
 
