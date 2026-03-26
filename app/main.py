@@ -32,10 +32,18 @@ shell_manager = ShellManager(WORKSPACE_DIR)
 
 def _start_tmate_bg():
     """Init tmate session in background so app starts fast."""
+    print("[tmate] Starting session...", flush=True)
     try:
-        shell_manager.get_or_create_session()
+        s = shell_manager.get_or_create_session()
+        if s.web_url:
+            print(f"[tmate] ✓ Session ready", flush=True)
+            print(f"[tmate] Web (read-only): {s.web_url}", flush=True)
+            if s.ssh_url:
+                print(f"[tmate] SSH (read-only): {s.ssh_url}", flush=True)
+        else:
+            print("[tmate] ✗ Session started but no URL received (check internet access to tmate.io)", flush=True)
     except Exception as e:
-        print(f"[tmate] init error: {e}")
+        print(f"[tmate] ✗ Init error: {e}", flush=True)
 
 
 @app.on_event("startup")
