@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,6 +25,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 templates = Jinja2Templates(directory="templates")
+
+# Serve xterm.js locally (no CDN dependency)
+import pathlib
+_static_dir = pathlib.Path("/app/static")
+if _static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
 
