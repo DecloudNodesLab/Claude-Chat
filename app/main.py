@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -142,18 +142,59 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
         raise HTTPException(status_code=400, detail="Empty message")
     messages = storage.load_chat(chat_id) or []
     messages.append({"role": "user", "content": user_message})
-    try:
-        reply, tool_uses = await handle_chat_message(
-            messages=messages,
-            workspace_dir=WORKSPACE_DIR,
-            shell_manager=shell_manager,
-            chat_id=chat_id,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    messages.append({"role": "assistant", "content": reply})
-    storage.save_chat(chat_id, messages)
-    return {"reply": reply, "tool_uses": tool_uses, "messages": messages}
+
+    async def generate():
+        import json as _json
+        done_event = asyncio.Event()
+        result_holder = {}
+        error_holder = {}
+
+        async def run_claude():
+            try:
+                reply, tool_uses = await handle_chat_message(
+                    messages=messages,
+                    workspace_dir=WORKSPACE_DIR,
+                    shell_manager=shell_manager,
+                    chat_id=chat_id,
+                )
+                result_holder["reply"] = reply
+                result_holder["tool_uses"] = tool_uses
+            except Exception as e:
+                error_holder["error"] = str(e)
+            finally:
+                done_event.set()
+
+        asyncio.create_task(run_claude())
+
+        # Send keep-alive pings every 5s so proxy doesn't close the connection
+        while not done_event.is_set():
+            yield ": ping" + chr(10) + chr(10)
+            try:
+                await asyncio.wait_for(asyncio.shield(done_event.wait()), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+
+        if "error" in error_holder:
+            payload = _json.dumps({"error": error_holder["error"]})
+            yield "data: " + payload + chr(10) + chr(10)
+            return
+
+        reply = result_holder["reply"]
+        tool_uses = result_holder["tool_uses"]
+        messages.append({"role": "assistant", "content": reply})
+        storage.save_chat(chat_id, messages)
+        payload = _json.dumps({"reply": reply, "tool_uses": tool_uses, "messages": messages})
+        yield "data: " + payload + chr(10) + chr(10)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.websocket("/ws/shell/{session_id}")
