@@ -13,6 +13,9 @@ mkdir -p "${WORKSPACE_DIR}" "${DATA_DIR}/chats"
 cp /app/templates/style.css "${WORKSPACE_DIR}/style.css"
 echo "  Updated style.css -> ${WORKSPACE_DIR}/style.css"
 
+cp /app/templates/favicon.ico "${WORKSPACE_DIR}/favicon.ico"
+echo "  Updated favicon.ico -> ${WORKSPACE_DIR}/favicon.ico"
+
 # Copy index.html only on first run (user may have edited it)
 if [ ! -f "${WORKSPACE_DIR}/index.html" ]; then
     cp /app/templates/index.html "${WORKSPACE_DIR}/index.html"
