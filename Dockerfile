@@ -11,6 +11,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download xterm.js static files locally so CDN is not needed
+RUN mkdir -p /app/static/xterm && \
+    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js" \
+         -o /app/static/xterm/xterm.min.js && \
+    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" \
+         -o /app/static/xterm/xterm.min.css && \
+    curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js" \
+         -o /app/static/xterm/addon-fit.min.js && \
+    echo "xterm.js downloaded: $(wc -c < /app/static/xterm/xterm.min.js) bytes"
+
 COPY app/ ./app/
 COPY templates/ ./templates/
 COPY entrypoint.sh /entrypoint.sh
