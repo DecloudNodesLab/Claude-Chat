@@ -1,11 +1,11 @@
 import os
 import json
-import asyncio
 import uuid
+import asyncio
+import threading
 from pathlib import Path
-from typing import Optional
 
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,47 +18,60 @@ from app.i18n import get_translations, SUPPORTED_LOCALES
 
 WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", "/workspace"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Claude Workspace", docs_url=None, redoc_url=None)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
 templates = Jinja2Templates(directory="templates")
-
 storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
 
 
+def _start_tmate_bg():
+    """Init tmate session in background so app starts fast."""
+    try:
+        shell_manager.get_or_create_session()
+    except Exception as e:
+        print(f"[tmate] init error: {e}")
+
+
+@app.on_event("startup")
+async def startup():
+    t = threading.Thread(target=_start_tmate_bg, daemon=True)
+    t.start()
+
+
 def get_locale(request: Request) -> str:
-    cookie_locale = request.cookies.get("locale")
-    if cookie_locale and cookie_locale in SUPPORTED_LOCALES:
-        return cookie_locale
-    default = os.environ.get("DEFAULT_LOCALE", "en")
-    return default if default in SUPPORTED_LOCALES else "en"
+    c = request.cookies.get("locale")
+    if c and c in SUPPORTED_LOCALES:
+        return c
+    d = os.environ.get("DEFAULT_LOCALE", "en")
+    return d if d in SUPPORTED_LOCALES else "en"
 
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "workspace": str(WORKSPACE_DIR), "data": str(DATA_DIR)}
+    return {"status": "ok"}
+
+
+@app.get("/tmate-url")
+async def tmate_url(_=Depends(basic_auth)):
+    s = shell_manager._session
+    if s and s.web_url:
+        return {"url": s.web_url, "ssh": s.ssh_url, "ready": True}
+    return {"url": None, "ready": False}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -66,12 +79,14 @@ async def index(request: Request, _=Depends(basic_auth)):
     locale = get_locale(request)
     t = get_translations(locale)
     chats = storage.list_chats()
+    tmate_url = shell_manager.get_web_url()
     return templates.TemplateResponse("index.html", {
         "request": request,
         "t": t,
         "locale": locale,
         "chats": chats,
         "supported_locales": SUPPORTED_LOCALES,
+        "tmate_url": tmate_url or "",
     })
 
 
@@ -79,26 +94,19 @@ async def index(request: Request, _=Depends(basic_auth)):
 async def set_locale(locale: str, _=Depends(basic_auth)):
     if locale not in SUPPORTED_LOCALES:
         raise HTTPException(status_code=400, detail="Unsupported locale")
-    response = JSONResponse({"ok": True})
-    response.set_cookie("locale", locale, max_age=60 * 60 * 24 * 365)
-    return response
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("locale", locale, max_age=60*60*24*365)
+    return resp
 
 
 @app.post("/upload")
-async def upload_file(
-    request: Request,
-    file: UploadFile = File(...),
-    _=Depends(basic_auth),
-):
+async def upload_file(file: UploadFile = File(...), _=Depends(basic_auth)):
     filename = Path(file.filename).name
     if not filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
-
-    dest = WORKSPACE_DIR / filename
-    dest = dest.resolve()
+    dest = (WORKSPACE_DIR / filename).resolve()
     if not str(dest).startswith(str(WORKSPACE_DIR.resolve())):
         raise HTTPException(status_code=400, detail="Invalid path")
-
     content = await file.read()
     dest.write_bytes(content)
     return JSONResponse({"ok": True, "filename": filename, "size": len(content)})
@@ -136,15 +144,10 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
     user_message = body.get("message", "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Empty message")
-
-    messages = storage.load_chat(chat_id)
-    if messages is None:
-        messages = []
-
+    messages = storage.load_chat(chat_id) or []
     messages.append({"role": "user", "content": user_message})
-
     try:
-        assistant_reply, tool_uses = await handle_chat_message(
+        reply, tool_uses = await handle_chat_message(
             messages=messages,
             workspace_dir=WORKSPACE_DIR,
             shell_manager=shell_manager,
@@ -152,29 +155,28 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-    messages.append({"role": "assistant", "content": assistant_reply})
+    messages.append({"role": "assistant", "content": reply})
     storage.save_chat(chat_id, messages)
-
-    return {
-        "reply": assistant_reply,
-        "tool_uses": tool_uses,
-        "messages": messages,
-    }
+    return {"reply": reply, "tool_uses": tool_uses, "messages": messages}
 
 
 @app.websocket("/ws/shell/{session_id}")
-async def shell_websocket(websocket: WebSocket, session_id: str):
-    # WebSocket не поддерживает Basic Auth из браузера.
-    # Страница защищена Basic Auth, поэтому WS доступен только авторизованным.
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_") or "default"
+async def shell_ws(websocket: WebSocket, session_id: str):
     await websocket.accept()
     try:
-        await shell_manager.handle_websocket(websocket, safe_id)
-    except WebSocketDisconnect:
-        pass
+        # Send tmate URL to client
+        s = shell_manager._session
+        await websocket.send_text(json.dumps({
+            "type": "tmate",
+            "web_url": s.web_url if s else None,
+            "ssh_url": s.ssh_url if s else None,
+        }) if True else "{}")
+        while True:
+            await asyncio.sleep(10)
+            s = shell_manager._session
+            await websocket.send_text(json.dumps({
+                "type": "tmate",
+                "web_url": s.web_url if s else None,
+            }))
     except Exception:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        pass
