@@ -94,12 +94,11 @@ class ShellSession:
         self.write(command.encode("utf-8", errors="replace"))
 
     def inject_claude_command(self, command: str):
-        """Inject Claude command into PTY using echo for clean green label."""
-        # Use echo -e with ANSI inside a shell command — clean, no PTY escape issues
-        safe = command.replace("'", "'\''")
-        # Print colored label via echo, then run the actual command
-        full = f"echo -e '\033[1;32m> [Claude] {safe}\033[0m' ; {command}\n"
-        self.write(full.encode("utf-8", errors="replace"))
+        """Inject Claude command as plain text comment + command. No ANSI to avoid glitches."""
+        # Write a plain comment line, then the command on next line
+        # Using \r\n is safe here - it's just moving to new line before typing
+        line = f"# [Claude] {command}\n{command}\n"
+        self.write(line.encode("utf-8", errors="replace"))
 
     def stop(self):
         self._running = False
