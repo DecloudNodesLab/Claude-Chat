@@ -1,703 +1,97 @@
-<!DOCTYPE html>
-<html lang="{{ locale }}">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ t.title }}</title>
-<link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="app">
-  <div class="sidebar">
-    <div class="sidebar-header">
-      <div style="display:flex;align-items:center;">
-        <span class="sidebar-logo">◆</span>
-        <span class="sidebar-title">{{ t.title }}</span>
-      </div>
-    </div>
-    <div style="padding:10px 10px 4px;">
-      <div class="sidebar-section-label">{{ t.language }}</div>
-      <div class="lang-switcher">
-        {% for loc in supported_locales %}
-        <button class="lang-btn {% if loc == locale %}active{% endif %}" onclick="setLocale('{{ loc }}')">{{ loc.upper() }}</button>
-        {% endfor %}
-      </div>
-    </div>
-    <div class="sidebar-section">
-      <button class="new-chat-btn" onclick="newChat()"><span>+</span> {{ t.new_chat }}</button>
-    </div>
-    <div class="sidebar-section" style="padding-bottom:4px;">
-      <div class="sidebar-section-label">{{ t.chat_history }}</div>
-    </div>
-    <div class="chat-list" id="chatList">
-      {% if chats %}
-        {% for chat in chats %}
-        <div class="chat-item {% if loop.first %}active{% endif %}" id="chat-item-{{ chat.id }}" onclick="loadChat('{{ chat.id }}')">
-          <div class="chat-item-preview">{{ chat.preview }}</div>
-          <button class="chat-item-delete" onclick="deleteChat(event,'{{ chat.id }}')" title="{{ t.delete_chat }}">×</button>
-        </div>
-        {% endfor %}
-      {% else %}
-        <div class="no-chats" id="noChats">{{ t.no_chats }}</div>
-      {% endif %}
-    </div>
-  </div>
-
-  <div class="main">
-    <div class="upload-section">
-      <div class="upload-label">{{ t.upload_section }}</div>
-      <div class="upload-form">
-        <div class="file-input-wrapper">
-          <label class="file-choose-btn" for="fileInput">{{ t.choose_file }}</label>
-          <input type="file" id="fileInput" multiple onchange="onFileChosen()">
-        </div>
-        <span class="file-name" id="fileName">{{ t.no_file_chosen }}</span>
-        <button class="upload-btn" id="uploadBtn" onclick="uploadFile()" disabled>{{ t.upload_button }}</button>
-        <span id="uploadStatus" class="upload-status" style="display:none;"></span>
-      </div>
-    </div>
-
-    <div class="chat-area">
-      <div class="chat-header">{{ t.chat_section }}</div>
-      <div class="messages" id="messages">
-        <div class="messages-placeholder" id="chatPlaceholder">{{ t.select_chat }}</div>
-      </div>
-      <div class="chat-input-area">
-        <div class="chat-input-row">
-          <textarea class="chat-textarea" id="chatInput" placeholder="{{ t.message_placeholder }}"
-            rows="1" onkeydown="onChatKeydown(event)" oninput="autoResize(this)"></textarea>
-          <button class="send-btn" id="sendBtn" onclick="sendMessage()">{{ t.send }}</button>
-        </div>
-      </div>
-    </div>
-
-
-    <div class="shell-section" id="shellSection">
-      <div class="shell-header">
-        <div class="shell-title">{{ t.shell_section }}</div>
-        <div class="shell-status disconnected" id="shellStatus">{{ t.shell_connecting }}</div>
-        <button class="shell-btn" id="copyBtn" onclick="copySelection()" style="margin-left:auto" title="Copy selected text (Ctrl+Shift+C)">Copy</button>
-        <button class="shell-btn" onclick="reconnectShell()">{{ t.reconnect }}</button>
-      </div>
-      <div class="term-viewport" id="termViewport" tabindex="0">
-        <canvas id="termCanvas"></canvas>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-const T = {{ t | tojson }};
-let currentChatId = null;
-let isThinking = false;
-
-async function setLocale(loc){await fetch('/locale/'+loc,{method:'POST'});location.reload();}
-
-function onFileChosen(){
-  const i=document.getElementById('fileInput'),b=document.getElementById('uploadBtn'),n=document.getElementById('fileName');
-  if(i.files.length>0){n.textContent=Array.from(i.files).map(f=>f.name).join(', ');b.disabled=false;}
-  else{n.textContent=T.no_file_chosen;b.disabled=true;}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:#0f1117; --bg2:#171923; --bg3:#1e2130;
+  --border:#2d3250; --accent:#7c8dff; --accent2:#5a6cf7;
+  --text:#e2e8f0; --text2:#94a3b8; --text3:#64748b;
+  --success:#4ade80; --error:#f87171; --warning:#fbbf24;
+  --radius:8px;
+  --font-mono:'JetBrains Mono','Fira Code','Consolas',monospace;
+  --font-ui:'Inter',system-ui,sans-serif;
 }
-async function uploadFile(){
-  const inp=document.getElementById('fileInput'),btn=document.getElementById('uploadBtn'),st=document.getElementById('uploadStatus');
-  if(!inp.files.length)return;
-  btn.disabled=true;btn.textContent=T.uploading;st.style.display='none';
-  const errors=[],ok=[];
-  for(const f of inp.files){const fd=new FormData();fd.append('file',f);
-    try{const r=await fetch('/upload',{method:'POST',body:fd});if(r.ok)ok.push(f.name);else{const d=await r.json();errors.push(f.name+': '+(d.detail||T.upload_error));}}
-    catch(e){errors.push(f.name+': '+e.message);}
-  }
-  btn.disabled=false;btn.textContent=T.upload_button;st.style.display='inline';
-  if(errors.length){st.className='upload-status error';st.textContent=errors.join(' | ');}
-  else{st.className='upload-status';st.textContent=T.upload_success+': '+ok.join(', ');}
-  inp.value='';document.getElementById('fileName').textContent=T.no_file_chosen;
-  setTimeout(()=>{st.style.display='none';},4000);
-}
-
-async function newChat(){
-  const r=await fetch('/chats',{method:'POST'});const d=await r.json();
-  currentChatId=d.id;renderMessages([]);addChatItem(d.id,T.new_chat,true);
-  document.getElementById('chatInput').focus();
-}
-async function loadChat(id){
-  const r=await fetch('/chats/'+id);if(!r.ok)return;
-  const d=await r.json();currentChatId=id;renderMessages(d.messages);
-  document.querySelectorAll('.chat-item').forEach(e=>e.classList.remove('active'));
-  const it=document.getElementById('chat-item-'+id);if(it)it.classList.add('active');
-}
-async function deleteChat(e,id){
-  e.stopPropagation();await fetch('/chats/'+id,{method:'DELETE'});
-  const it=document.getElementById('chat-item-'+id);if(it)it.remove();
-  if(currentChatId===id){currentChatId=null;document.getElementById('messages').innerHTML='<div class="messages-placeholder">'+T.select_chat+'</div>';}
-  if(!document.querySelector('.chat-item')){const l=document.getElementById('chatList');const d=document.createElement('div');d.className='no-chats';d.id='noChats';d.textContent=T.no_chats;l.appendChild(d);}
-}
-function addChatItem(id,preview,active){
-  const nc=document.getElementById('noChats');if(nc)nc.remove();
-  document.querySelectorAll('.chat-item').forEach(e=>e.classList.remove('active'));
-  const l=document.getElementById('chatList');const it=document.createElement('div');
-  it.className='chat-item'+(active?' active':'');it.id='chat-item-'+id;it.onclick=()=>loadChat(id);
-  it.innerHTML=`<div class="chat-item-preview">${esc(preview)}</div><button class="chat-item-delete" onclick="deleteChat(event,'${id}')" title="${T.delete_chat}">×</button>`;
-  l.insertBefore(it,l.firstChild);
-}
-function updatePreview(id,text){const it=document.getElementById('chat-item-'+id);if(it){const el=it.querySelector('.chat-item-preview');if(el)el.textContent=text.substring(0,60)+(text.length>60?'..':'');}}
-
-async function sendMessage(){
-  if(!currentChatId)await newChat();
-  const inp=document.getElementById('chatInput');
-  const txt=inp.value.trim();
-  if(!txt||isThinking)return;
-  inp.value='';autoResize(inp);
-  appendMsg('user',txt,[]);
-  setThinking(true);
-  updatePreview(currentChatId,txt);
-
-  // Step 1: POST message → get task_id immediately (fast, no timeout)
-  let taskId;
-  try{
-    const r=await fetch('/chats/'+currentChatId+'/message',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:txt})
-    });
-    if(!r.ok){
-      const e=await r.json().catch(()=>({detail:'Request failed'}));
-      setThinking(false);appendErr(e.detail||'Error');return;
-    }
-    const d=await r.json();
-    taskId=d.task_id;
-  }catch(e){setThinking(false);appendErr(e.message);return;}
-
-  // Step 2: Poll /tasks/{task_id} every 2s until done
-  let attempts=0;
-  const maxAttempts=180; // 6 minutes max
-  const poll=async()=>{
-    attempts++;
-    if(attempts>maxAttempts){setThinking(false);appendErr('Timeout: Claude took too long');return;}
-    try{
-      const r=await fetch('/tasks/'+taskId);
-      if(!r.ok){setThinking(false);appendErr('Task not found');return;}
-      const d=await r.json();
-      if(d.status==='running'){
-        setTimeout(poll,2000);
-        return;
-      }
-      setThinking(false);
-      if(d.status==='error'){appendErr(d.error||'Unknown error');return;}
-      if(d.status==='done'){appendMsg('assistant',d.reply,d.tool_uses||[]);return;}
-    }catch(e){
-      // Network hiccup — keep polling
-      if(attempts<maxAttempts)setTimeout(poll,2000);
-      else{setThinking(false);appendErr(e.message);}
-    }
-  };
-  setTimeout(poll,1000);
-}
-
-function appendMsg(role, content, tools){
-  const ph=document.getElementById('chatPlaceholder');if(ph)ph.remove();
-  const msgs=document.getElementById('messages');
-  const div=document.createElement('div');div.className='message '+role;
-  const label=role==='user'?T.you:T.assistant;
-  div.innerHTML=`<div class="message-header"><span class="message-role ${role}">${label}</span></div><div class="message-body">${fmt(content)}</div>`;
-
-  // Show tool indicators — compact, no output in chat
-  if(tools && tools.length){
-    const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
-    for(const t of tools){
-      const badge=document.createElement('span');
-      badge.className='tool-indicator';
-      // Show command for run_command, just tool name for others
-      if(t.tool==='run_command' && t.input && t.input.command){
-        const cmd=t.input.command.length>60 ? t.input.command.substring(0,60)+'…' : t.input.command;
-        badge.textContent='⚙ $ '+cmd;
-      } else {
-        badge.textContent='⚙ '+t.tool+(t.error?' ✗':'');
-      }
-      if(t.error) badge.style.borderColor='rgba(248,113,113,.3)';
-      wrap.appendChild(badge);
-    }
-    div.appendChild(wrap);
-  }
-  msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;
-}
-
-function appendErr(t){const msgs=document.getElementById('messages');const d=document.createElement('div');d.style.cssText='color:var(--error);font-size:12px;padding:6px 0;';d.textContent='⚠ '+t;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;}
-function setThinking(v){isThinking=v;const btn=document.getElementById('sendBtn');btn.disabled=v;btn.textContent=v?'...':T.send;const msgs=document.getElementById('messages');const ex=document.getElementById('thinkingIndicator');if(v&&!ex){const d=document.createElement('div');d.className='thinking';d.id='thinkingIndicator';d.innerHTML=`<div class="dots"><span></span><span></span><span></span></div><span>${T.thinking}</span>`;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;}else if(!v&&ex)ex.remove();}
-function renderMessages(msgs){const c=document.getElementById('messages');c.innerHTML='';if(!msgs||!msgs.length){c.innerHTML='<div class="messages-placeholder">'+T.select_chat+'</div>';return;}for(const m of msgs)if(m.role==='user'||m.role==='assistant')appendMsg(m.role,m.content,[]);}
-function fmt(t){if(!t)return '';let s=esc(t);s=s.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c}</code></pre>`);s=s.replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`);return s;}
-function esc(t){if(typeof t!=='string')t=String(t||'');return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function onChatKeydown(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}}
-function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,140)+'px';}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Canvas VT100 Terminal with scrollback, text selection, copy
-// ══════════════════════════════════════════════════════════════════════════════
-const TERM = (() => {
-  const COLS = 220, ROWS = 50, SCROLLBACK = 2000;
-  const CHAR_W = 9, CHAR_H = 16;
-
-  let canvas, ctx, vp;
-  let scrollbuf = []; // all lines ever (scrollback + screen)
-  let screen = [];    // ROWS lines currently visible
-  let cx = 0, cy = 0;
-  let fgColor = '#e2e8f0', bgColor = '#0a0c12', bold = false;
-  let scrollRegTop = 0, scrollRegBot = ROWS - 1;
-  let parseState = 'normal', escBuf = '';
-  let savedCx = 0, savedCy = 0;
-  // viewport scroll offset (lines from bottom)
-  let viewOffset = 0; // 0 = showing bottom; positive = scrolled up
-
-  // Selection state
-  let selStart = null, selEnd = null, selecting = false;
-  let mouseDownCell = null;
-
-  const ANSI_COLORS = [
-    '#1e2130','#f87171','#4ade80','#fbbf24','#7c8dff','#c084fc','#22d3ee','#e2e8f0',
-    '#64748b','#fca5a5','#86efac','#fde68a','#a5b4fc','#d8b4fe','#67e8f9','#f8fafc'
-  ];
-
-  function blankRow(){const r=[];for(let c=0;c<COLS;c++)r[c]={ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};return r;}
-
-  function initScreen(){
-    screen=[];for(let r=0;r<ROWS;r++)screen[r]=blankRow();
-    scrollbuf=[];for(let r=0;r<ROWS;r++)scrollbuf.push(screen[r]);
-    cx=0;cy=0;scrollRegTop=0;scrollRegBot=ROWS-1;
-  }
-
-  function init(canvasEl, viewportEl){
-    canvas=canvasEl; vp=viewportEl; ctx=canvas.getContext('2d');
-    initScreen();
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
-
-    // Mouse events for selection
-    vp.addEventListener('mousedown', onMouseDown);
-    vp.addEventListener('mousemove', onMouseMove);
-    vp.addEventListener('mouseup', onMouseUp);
-    vp.addEventListener('contextmenu', onContextMenu);
-
-    // Keyboard
-    vp.addEventListener('keydown', onKey);
-
-    // Wheel scroll
-    vp.addEventListener('wheel', onWheel, {passive:false});
-
-    setInterval(()=>{blinkState=!blinkState; renderCursorOnly();}, 530);
-    render();
-  }
-
-  function resizeCanvas(){
-    canvas.width = vp.clientWidth || 800;
-    canvas.height = ROWS * CHAR_H;
-    // Keep scroll position at bottom when not scrolled up
-    if(viewOffset === 0) scrollToBottom();
-    render();
-  }
-
-  function scrollToBottom(){
-    viewOffset = 0;
-  }
-
-  // Convert pixel coords to cell coords
-  function pixToCell(px, py){
-    const rect = canvas.getBoundingClientRect();
-    const x = px - rect.left;
-    const y = py - rect.top;
-    const col = Math.max(0, Math.min(COLS-1, Math.floor(x / CHAR_W)));
-    const row = Math.max(0, Math.min(ROWS-1, Math.floor(y / CHAR_H)));
-    return {row, col};
-  }
-
-  function onMouseDown(e){
-    if(e.button !== 0) return;
-    vp.focus();
-    const cell = pixToCell(e.clientX, e.clientY);
-    mouseDownCell = cell;
-    selStart = {...cell}; selEnd = {...cell};
-    selecting = true;
-    render();
-  }
-  function onMouseMove(e){
-    if(!selecting) return;
-    const cell = pixToCell(e.clientX, e.clientY);
-    selEnd = {...cell};
-    render();
-  }
-  function onMouseUp(e){
-    if(!selecting) return;
-    selecting = false;
-    const cell = pixToCell(e.clientX, e.clientY);
-    selEnd = {...cell};
-    // If tiny movement = click, clear selection
-    if(selStart && Math.abs(selStart.col-selEnd.col)<1 && Math.abs(selStart.row-selEnd.row)<1){
-      selStart=null; selEnd=null;
-    }
-    render();
-  }
-  function onContextMenu(e){
-    e.preventDefault();
-    copySelection();
-  }
-
-  function onWheel(e){
-    e.preventDefault();
-    // deltaY positive = scroll down = show newer content = decrease offset
-    const delta = e.deltaMode === 1 ? e.deltaY * 3 : e.deltaY;
-    const lines = Math.max(1, Math.round(Math.abs(delta) / CHAR_H)) * Math.sign(delta);
-    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
-    viewOffset = Math.max(0, Math.min(maxOffset, viewOffset - lines));
-    scheduleRender();
-  }
-
-  function getSelectedText(){
-    if(!selStart || !selEnd) return '';
-    let r0=selStart.row, c0=selStart.col, r1=selEnd.row, c1=selEnd.col;
-    if(r0>r1||(r0===r1&&c0>c1)){[r0,r1]=[r1,r0];[c0,c1]=[c1,c0];}
-    const viewStart = Math.max(0, scrollbuf.length - ROWS - viewOffset);
-    let lines=[];
-    for(let r=r0;r<=r1;r++){
-      const bufRow = viewStart + r;
-      const row = bufRow < scrollbuf.length ? scrollbuf[bufRow] : blankRow();
-      const fc = r===r0?c0:0;
-      const tc = r===r1?c1+1:COLS;
-      let line='';
-      for(let c=fc;c<tc;c++) line += (row[c]?row[c].ch:' ');
-      lines.push(line.trimEnd());
-    }
-    return lines.join('\n');
-  }
-
-  function copySelection(){
-    const text = getSelectedText();
-    if(!text) return;
-    navigator.clipboard.writeText(text).then(()=>{
-      const btn=document.getElementById('copyBtn');
-      if(btn){btn.textContent='✓ Copied';btn.classList.add('copied');setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('copied');},1500);}
-    }).catch(()=>{
-      // Fallback: textarea trick
-      const ta=document.createElement('textarea');ta.value=text;
-      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
-    });
-  }
-
-  // Expose copySelection globally
-  window._termCopy = copySelection;
-
-  let blinkState = true;
-
-  function cellSelected(r, c){
-    if(!selStart||!selEnd) return false;
-    let r0=selStart.row,c0=selStart.col,r1=selEnd.row,c1=selEnd.col;
-    if(r0>r1||(r0===r1&&c0>c1)){[r0,r1]=[r1,r0];[c0,c1]=[c1,c0];}
-    if(r<r0||r>r1) return false;
-    if(r0===r1) return c>=c0&&c<=c1;
-    if(r===r0) return c>=c0;
-    if(r===r1) return c<=c1;
-    return true;
-  }
-
-  function render(){
-    if(!ctx) return;
-    ctx.fillStyle='#0a0c12';
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
-    const viewStart = Math.max(0, scrollbuf.length - ROWS - viewOffset);
-
-    for(let r=0;r<ROWS;r++){
-      const bufRow = viewStart + r;
-      const row = bufRow < scrollbuf.length ? scrollbuf[bufRow] : null;
-      if(!row) continue;
-      for(let c=0;c<COLS&&c*CHAR_W<canvas.width;c++){
-        const cell = row[c] || {ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};
-        const selected = cellSelected(r,c);
-        ctx.fillStyle = selected ? 'rgba(124,141,255,0.35)' : cell.bg;
-        ctx.fillRect(c*CHAR_W, r*CHAR_H, CHAR_W, CHAR_H);
-        if(selected) ctx.fillStyle = '#fff';
-        else ctx.fillStyle = cell.fg;
-        if(cell.ch !== ' '){
-          ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';
-          ctx.fillText(cell.ch, c*CHAR_W, r*CHAR_H+CHAR_H-3);
-        }
-      }
-    }
-    // Cursor (only when at bottom / not scrolled up)
-    if(viewOffset===0 && blinkState){
-      ctx.fillStyle='#7c8dff';
-      ctx.fillRect(cx*CHAR_W, cy*CHAR_H, CHAR_W, CHAR_H);
-      const cell=screen[cy]?screen[cy][cx]:null;
-      if(cell&&cell.ch!==' '){
-        ctx.fillStyle='#0a0c12';
-        ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';
-        ctx.fillText(cell.ch, cx*CHAR_W, cy*CHAR_H+CHAR_H-3);
-      }
-    }
-    drawScrollbar();
-    updateScrollHeight();
-  }
-
-  let renderReq=null;
-  function scheduleRender(){
-    if(renderReq) return;
-    renderReq=requestAnimationFrame(()=>{renderReq=null;render();});
-  }
-
-  function renderCursorOnly(){
-    if(viewOffset!==0) return;
-    if(!ctx) return;
-    // Erase old cursor area then redraw cell + cursor
-    const cell=screen[cy]?screen[cy][cx]:{ch:' ',fg:'#e2e8f0',bg:'#0a0c12',bold:false};
-    ctx.fillStyle=cell.bg;ctx.fillRect(cx*CHAR_W,cy*CHAR_H,CHAR_W,CHAR_H);
-    if(blinkState){
-      ctx.fillStyle='#7c8dff';ctx.fillRect(cx*CHAR_W,cy*CHAR_H,CHAR_W,CHAR_H);
-      if(cell.ch!==' '){ctx.fillStyle='#0a0c12';ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';ctx.fillText(cell.ch,cx*CHAR_W,cy*CHAR_H+CHAR_H-3);}
-    } else {
-      if(cell.ch!==' '){ctx.fillStyle=cell.fg;ctx.font=(cell.bold?'bold ':'')+CHAR_H+'px monospace';ctx.fillText(cell.ch,cx*CHAR_W,cy*CHAR_H+CHAR_H-3);}
-    }
-  }
-
-  function drawScrollbar(){
-    const maxOffset = Math.max(0, scrollbuf.length - ROWS);
-    if(maxOffset === 0) return; // no scrollbar needed
-    const sbW = 8;
-    const h = canvas.height;
-    // Track
-    ctx.fillStyle = '#1a1e2e';
-    ctx.fillRect(canvas.width - sbW, 0, sbW, h);
-    // Thumb
-    const ratio = ROWS / scrollbuf.length;
-    const thumbH = Math.max(20, h * ratio);
-    const thumbY = (1 - viewOffset / maxOffset) * (h - thumbH);
-    ctx.fillStyle = viewOffset > 0 ? '#7c8dff' : '#2d3250';
-    ctx.beginPath();
-    ctx.roundRect(canvas.width - sbW + 1, thumbY, sbW - 2, thumbH, 3);
-    ctx.fill();
-  }
-
-  function updateScrollHeight(){
-    // Scroll to bottom on new output
-    if(viewOffset === 0) {
-      // already at bottom, nothing to do
-    }
-  }
-
-  // ── Terminal logic ───────────────────────────────────────────────────────
-  function setCell(c,r,ch){
-    if(r<0||r>=ROWS||c<0||c>=COLS) return;
-    screen[r][c]={ch,fg:fgColor,bg:bgColor,bold};
-    // Sync to scrollbuf
-    const bufIdx = scrollbuf.length - ROWS + r;
-    if(bufIdx>=0) scrollbuf[bufIdx]=screen[r];
-  }
-
-  function pushScrollback(){
-    // Add a new blank line at bottom of scrollbuf, trim if over limit
-    const newLine = blankRow();
-    scrollbuf.push(newLine);
-    if(scrollbuf.length > ROWS + SCROLLBACK){
-      scrollbuf.shift();
-    }
-    // Rebuild screen reference from scrollbuf tail
-    for(let r=0;r<ROWS;r++){
-      const bi = scrollbuf.length - ROWS + r;
-      if(bi>=0) screen[r]=scrollbuf[bi]; else screen[r]=blankRow();
-    }
-  }
-
-  function scrollUpRegion(){
-    if(scrollRegTop===0 && scrollRegBot===ROWS-1){
-      // Full screen scroll — push to scrollback
-      pushScrollback();
-      screen[scrollRegBot]=blankRow();
-      scrollbuf[scrollbuf.length-1]=screen[scrollRegBot];
-    } else {
-      for(let r=scrollRegTop;r<scrollRegBot;r++) screen[r]=screen[r+1]?[...screen[r+1]]:blankRow();
-      screen[scrollRegBot]=blankRow();
-      // Sync scrollbuf
-      for(let r=scrollRegTop;r<=scrollRegBot;r++){const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}
-    }
-  }
-
-  function scrollDownRegion(){
-    for(let r=scrollRegBot;r>scrollRegTop;r--) screen[r]=screen[r-1]?[...screen[r-1]]:blankRow();
-    screen[scrollRegTop]=blankRow();
-    for(let r=scrollRegTop;r<=scrollRegBot;r++){const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}
-  }
-
-  function newline(){
-    if(cy>=scrollRegBot) scrollUpRegion();
-    else cy++;
-  }
-
-  function applyCSI(cmd, params){
-    const p=(i,d=1)=>params[i]!==undefined&&params[i]!==''?parseInt(params[i]):d;
-    switch(cmd){
-      case 'A': cy=Math.max(scrollRegTop,cy-p(0)); break;
-      case 'B': cy=Math.min(scrollRegBot,cy+p(0)); break;
-      case 'C': cx=Math.min(COLS-1,cx+p(0)); break;
-      case 'D': cx=Math.max(0,cx-p(0)); break;
-      case 'H': case 'f': cy=Math.min(ROWS-1,Math.max(0,p(0)-1)); cx=Math.min(COLS-1,Math.max(0,p(1,1)-1)); break;
-      case 'J':{const m=p(0,0);
-        if(m===2||m===3){for(let r=0;r<ROWS;r++){screen[r]=blankRow();const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}cx=0;cy=0;}
-        else if(m===0){for(let r=cy;r<ROWS;r++)for(let c=(r===cy?cx:0);c<COLS;c++)setCell(c,r,' ');}
-        else if(m===1){for(let r=0;r<=cy;r++)for(let c=0;c<=(r===cy?cx:COLS-1);c++)setCell(c,r,' ');}
-        break;}
-      case 'K':{const m=p(0,0);
-        if(m===0)for(let c=cx;c<COLS;c++)setCell(c,cy,' ');
-        else if(m===1)for(let c=0;c<=cx;c++)setCell(c,cy,' ');
-        else for(let c=0;c<COLS;c++)setCell(c,cy,' ');
-        break;}
-      case 'L': for(let i=0;i<p(0);i++) scrollDownRegion(); break;
-      case 'M': for(let i=0;i<p(0);i++) scrollUpRegion(); break;
-      case 'P':{const n=p(0);for(let c=cx;c<COLS-n;c++)screen[cy][c]=screen[cy][c+n]||blankRow()[0];for(let c=COLS-n;c<COLS;c++)setCell(c,cy,' ');break;}
-      case 'S': for(let i=0;i<p(0);i++) scrollUpRegion(); break;
-      case 'T': for(let i=0;i<p(0);i++) scrollDownRegion(); break;
-      case 'd': cy=Math.min(ROWS-1,Math.max(0,p(0)-1)); break;
-      case 'G': cx=Math.min(COLS-1,Math.max(0,p(0)-1)); break;
-      case 'r': scrollRegTop=Math.max(0,p(0)-1); scrollRegBot=Math.min(ROWS-1,p(1,ROWS)-1); break;
-      case 's': savedCx=cx; savedCy=cy; break;
-      case 'u': cx=savedCx; cy=savedCy; break;
-      case 'm':{
-        if(!params.length||params[0]===''){fgColor='#e2e8f0';bgColor='#0a0c12';bold=false;break;}
-        let i=0;
-        while(i<params.length){
-          const n=parseInt(params[i])||0;
-          if(n===0){fgColor='#e2e8f0';bgColor='#0a0c12';bold=false;}
-          else if(n===1)bold=true;
-          else if(n===2||n===22)bold=false;
-          else if(n>=30&&n<=37)fgColor=ANSI_COLORS[n-30];
-          else if(n===39)fgColor='#e2e8f0';
-          else if(n>=40&&n<=47)bgColor=ANSI_COLORS[n-40];
-          else if(n===49)bgColor='#0a0c12';
-          else if(n>=90&&n<=97)fgColor=ANSI_COLORS[n-90+8];
-          else if(n>=100&&n<=107)bgColor=ANSI_COLORS[n-100+8];
-          else if((n===38||n===48)&&params[i+1]==='5'&&params[i+2]!==undefined){
-            const ci=parseInt(params[i+2]);const color=ci<16?ANSI_COLORS[ci]:'#888';
-            if(n===38)fgColor=color;else bgColor=color;i+=2;
-          } else if((n===38||n===48)&&params[i+1]==='2'&&params[i+4]!==undefined){
-            const color=`rgb(${params[i+2]},${params[i+3]},${params[i+4]})`;
-            if(n===38)fgColor=color;else bgColor=color;i+=4;
-          }
-          i++;
-        }
-        break;}
-    }
-  }
-
-  function write(data){
-    const str = new TextDecoder('utf-8',{fatal:false}).decode(data);
-    for(let i=0;i<str.length;i++){
-      const ch=str[i], code=str.charCodeAt(i);
-      if(parseState==='escape'){
-        if(ch==='['){parseState='csi';escBuf='';continue;}
-        if(ch===']'){parseState='osc';escBuf='';continue;}
-        if(ch==='M'){if(cy<=scrollRegTop)scrollDownRegion();else cy--;parseState='normal';continue;}
-        if(ch==='7'){savedCx=cx;savedCy=cy;parseState='normal';continue;}
-        if(ch==='8'){cx=savedCx;cy=savedCy;parseState='normal';continue;}
-        if(ch==='c'){for(let r=0;r<ROWS;r++){screen[r]=blankRow();const bi=scrollbuf.length-ROWS+r;if(bi>=0)scrollbuf[bi]=screen[r];}cx=0;cy=0;parseState='normal';continue;}
-        parseState='normal';continue;
-      }
-      if(parseState==='csi'){
-        if(code>=0x40&&code<=0x7e){applyCSI(ch,escBuf.split(';'));parseState='normal';}
-        else escBuf+=ch;
-        continue;
-      }
-      if(parseState==='osc'){
-        if(code===7||code===27||code===0x9c)parseState='normal';
-        continue;
-      }
-      if(code===27){parseState='escape';continue;}
-      if(code===155){parseState='csi';escBuf='';continue;}
-      if(ch==='\r'){cx=0;continue;}
-      if(ch==='\n'){newline();continue;}
-      if(ch==='\b'){if(cx>0)cx--;continue;}
-      if(ch==='\t'){cx=Math.min(COLS-1,Math.floor((cx+8)/8)*8);continue;}
-      if(ch==='\x07')continue;
-      if(code<32)continue;
-      setCell(cx,cy,ch);cx++;
-      if(cx>=COLS){cx=0;newline();}
-    }
-    scheduleRender();
-    // Auto-scroll to bottom on new output (if already at bottom)
-    if(viewOffset===0) setTimeout(scrollToBottom,0);
-  }
-
-  function onKey(e){
-    if(!shellWs||shellWs.readyState!==WebSocket.OPEN)return;
-    // Ctrl+Shift+C = copy
-    if(e.ctrlKey&&e.shiftKey&&e.key==='C'){e.preventDefault();copySelection();return;}
-    e.preventDefault();
-    let data='';
-    const k=e.key;
-    if(k==='Enter')data='\r';
-    else if(k==='Backspace')data='\x7f';
-    else if(k==='Tab')data='\t';
-    else if(k==='Escape')data='\x1b';
-    else if(k==='ArrowUp')data='\x1b[A';
-    else if(k==='ArrowDown')data='\x1b[B';
-    else if(k==='ArrowRight')data='\x1b[C';
-    else if(k==='ArrowLeft')data='\x1b[D';
-    else if(k==='Home')data='\x1b[H';
-    else if(k==='End')data='\x1b[F';
-    else if(k==='Delete')data='\x1b[3~';
-    else if(k==='PageUp')data='\x1b[5~';
-    else if(k==='PageDown')data='\x1b[6~';
-    else if(e.ctrlKey&&k.length===1){const c=k.toUpperCase().charCodeAt(0)-64;if(c>=0&&c<=31)data=String.fromCharCode(c);}
-    else if(k.length===1)data=k;
-    if(data)shellWs.send(new TextEncoder().encode(data));
-    // New input = scroll to bottom
-    viewOffset=0;scrollToBottom();
-  }
-
-  function resize(){
-    resizeCanvas();
-  }
-
-  return {init, write, resize, copy: copySelection};
-})();
-
-function copySelection(){ TERM.copy(); }
-
-// ─── WebSocket Shell ──────────────────────────────────────────────────────────
-let shellWs = null;
-let _reconnectTimer = null;
-
-function initTerminal(){
-  const canvas=document.getElementById('termCanvas');
-  const vp=document.getElementById('termViewport');
-  TERM.init(canvas,vp);
-  connectShell();
-}
-
-function connectShell(){
-  if(_reconnectTimer){clearTimeout(_reconnectTimer);_reconnectTimer=null;}
-  if(shellWs){shellWs.onclose=null;try{shellWs.close();}catch(e){}shellWs=null;}
-  const st=document.getElementById('shellStatus');
-  st.textContent=T.shell_connecting; st.className='shell-status disconnected';
-  const proto=location.protocol==='https:'?'wss:':'ws:';
-  shellWs=new WebSocket(`${proto}//${location.host}/ws/shell/default`);
-  shellWs.binaryType='arraybuffer';
-  shellWs.onopen=()=>{
-    st.textContent=T.shell_connected; st.className='shell-status connected';
-    shellWs.send(JSON.stringify({type:'resize',rows:50,cols:220}));
-  };
-  shellWs.onmessage=(event)=>{
-    if(typeof event.data==='string'){try{const m=JSON.parse(event.data);if(m.type==='connected')return;}catch(e){}return;}
-    if(event.data instanceof ArrayBuffer) TERM.write(new Uint8Array(event.data));
-  };
-  shellWs.onerror=()=>{st.textContent=T.shell_disconnected;st.className='shell-status disconnected';};
-  shellWs.onclose=()=>{st.textContent=T.shell_disconnected;st.className='shell-status disconnected';_reconnectTimer=setTimeout(connectShell,3000);};
-}
-
-function reconnectShell(){connectShell();}
-
-// resize handle removed - fixed height via CSS
-window.addEventListener('resize',()=>TERM.resize());
-
-document.addEventListener('DOMContentLoaded',()=>{
-  const first=document.querySelector('.chat-item');
-  if(first)loadChat(first.id.replace('chat-item-',''));
-  initTerminal();
-});
-</script>
-</body>
-</html>
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:14px;}
+.app{display:flex;height:100vh;overflow:hidden;}
+.sidebar{width:240px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;}
+.sidebar-header{padding:14px 14px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.sidebar-title{font-size:15px;font-weight:600;}
+.sidebar-logo{color:var(--accent);margin-right:6px;}
+.lang-switcher{display:flex;gap:4px;}
+.lang-btn{padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text2);cursor:pointer;font-size:12px;transition:all .15s;}
+.lang-btn.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+.lang-btn:hover:not(.active){border-color:var(--accent);color:var(--accent);}
+.sidebar-section{padding:10px 10px 4px;}
+.sidebar-section-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;padding:0 4px;}
+.new-chat-btn{width:100%;padding:8px 12px;background:var(--accent2);border:none;border-radius:var(--radius);color:#fff;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s;display:flex;align-items:center;gap:6px;}
+.new-chat-btn:hover{background:var(--accent);}
+.chat-list{flex:1;overflow-y:auto;padding:6px 10px;}
+.chat-item{display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:var(--radius);cursor:pointer;transition:background .12s;border:1px solid transparent;}
+.chat-item:hover{background:var(--bg3);}
+.chat-item.active{background:var(--bg3);border-color:var(--border);}
+.chat-item-preview{flex:1;font-size:12px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.chat-item-delete{width:20px;height:20px;border-radius:4px;border:none;background:transparent;color:var(--text3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .12s,color .12s;}
+.chat-item:hover .chat-item-delete{opacity:1;}
+.chat-item-delete:hover{color:var(--error);}
+.no-chats{font-size:12px;color:var(--text3);padding:8px 4px;text-align:center;}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.upload-section{padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.upload-label{font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap;}
+.upload-form{display:flex;align-items:center;gap:8px;flex:1;}
+.file-input-wrapper input[type="file"]{display:none;}
+.file-choose-btn{padding:5px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text2);cursor:pointer;font-size:12px;transition:all .15s;}
+.file-choose-btn:hover{border-color:var(--accent);color:var(--accent);}
+.file-name{font-size:12px;color:var(--text3);max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.upload-btn{padding:5px 14px;background:var(--accent2);border:none;border-radius:var(--radius);color:#fff;cursor:pointer;font-size:12px;font-weight:500;transition:background .15s;white-space:nowrap;}
+.upload-btn:hover{background:var(--accent);}
+.upload-btn:disabled{opacity:.5;cursor:not-allowed;}
+.upload-status{font-size:12px;color:var(--success);}
+.upload-status.error{color:var(--error);}
+.chat-area{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:200px;}
+.chat-header{padding:10px 16px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text2);}
+.messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;}
+.messages-placeholder{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text3);font-size:13px;}
+.message{display:flex;flex-direction:column;gap:4px;}
+.message-header{font-size:11px;color:var(--text3);}
+.message-role{font-weight:600;}
+.message-role.user{color:var(--accent);}
+.message-role.assistant{color:var(--success);}
+.message-body{padding:10px 13px;border-radius:var(--radius);line-height:1.6;font-size:13px;white-space:pre-wrap;word-break:break-word;}
+.message.user .message-body{background:#1e2d4a;border:1px solid rgba(124,141,255,.15);}
+.message.assistant .message-body{background:#1a1e2e;border:1px solid var(--border);}
+.message-body code{font-family:var(--font-mono);font-size:12px;background:rgba(255,255,255,.07);padding:1px 4px;border-radius:3px;}
+.message-body pre{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin:6px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12px;}
+.message-body pre code{background:none;padding:0;}
+/* Tool indicator — compact, no output */
+.tool-indicator{display:inline-flex;align-items:center;gap:5px;margin-top:5px;padding:3px 8px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:4px;font-size:11px;color:var(--warning);font-family:var(--font-mono);}
+.thinking{display:flex;align-items:center;gap:8px;color:var(--text3);font-size:13px;padding:8px 0;}
+.dots{display:flex;gap:3px;}
+.dots span{width:5px;height:5px;border-radius:50%;background:var(--accent);animation:blink 1.2s infinite;}
+.dots span:nth-child(2){animation-delay:.2s;}
+.dots span:nth-child(3){animation-delay:.4s;}
+@keyframes blink{0%,100%{opacity:.3}50%{opacity:1}}
+.chat-input-area{padding:12px 16px;border-top:1px solid var(--border);background:var(--bg2);}
+.chat-input-row{display:flex;gap:8px;align-items:flex-end;}
+.chat-textarea{flex:1;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;font-family:var(--font-ui);resize:none;outline:none;min-height:40px;max-height:140px;line-height:1.5;transition:border-color .15s;}
+.chat-textarea:focus{border-color:var(--accent);}
+.chat-textarea::placeholder{color:var(--text3);}
+.send-btn{padding:9px 16px;background:var(--accent2);border:none;border-radius:var(--radius);color:#fff;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s;white-space:nowrap;}
+.send-btn:hover{background:var(--accent);}
+.send-btn:disabled{opacity:.5;cursor:not-allowed;}
+.resize-handle{display:none;}
+.shell-section{height:20vh;min-height:120px;display:flex;flex-direction:column;background:#0a0c12;flex-shrink:0;}
+@media(min-width:1024px){.shell-section{height:40vh;}}
+.shell-header{padding:7px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;background:var(--bg2);flex-shrink:0;}
+.shell-title{font-size:12px;font-weight:600;color:var(--text2);}
+.shell-status{font-size:11px;padding:2px 8px;border-radius:4px;}
+.shell-status.connected{color:var(--success);background:rgba(74,222,128,.1);}
+.shell-status.disconnected{color:var(--error);background:rgba(248,113,113,.1);}
+.shell-btn{padding:3px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer;font-size:11px;transition:all .15s;}
+.shell-btn:hover{border-color:var(--accent);color:var(--accent);}
+.shell-btn.copied{border-color:var(--success);color:var(--success);}
+/* Terminal viewport: scrollable div containing canvas */
+.term-viewport{flex:1;overflow:hidden;background:#0a0c12;position:relative;cursor:text;}
+#termCanvas{display:block;}
+/* Custom scrollbar drawn on canvas - no CSS scroll needed */
+/* Selection overlay */
+.term-selection{position:absolute;background:rgba(124,141,255,0.3);pointer-events:none;}
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
