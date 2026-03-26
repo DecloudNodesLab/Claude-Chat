@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{{ t.title }}</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js"></script>
+<link rel="stylesheet" href="/static/xterm/xterm.min.css"/>
+<script src="/static/xterm/xterm.min.js"></script>
+<script src="/static/xterm/addon-fit.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
@@ -205,7 +205,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
         <button class="shell-reconnect-btn" onclick="reconnectShell()">{{ t.reconnect }}</button>
       </div>
       <div class="shell-container" id="shellContainer">
-        <div id="terminal"></div>
+        <div id="wsDebug" style="font-family:monospace;font-size:11px;color:#4ade80;padding:4px 8px;background:#0a0c12;max-height:60px;overflow:hidden;border-bottom:1px solid #2d3250;"></div>
+        <div id="terminal" style="height:calc(100% - 64px)"></div>
       </div>
     </div>
 
@@ -467,6 +468,7 @@ function initTerminal() {
   const container = document.getElementById('terminal');
   term.open(container);
 
+  console.log('[xterm] Terminal created, opening...');
   // Attach onData ONCE
   _dataDisposable = term.onData(data => {
     if (shellWs && shellWs.readyState === WebSocket.OPEN)
@@ -476,7 +478,8 @@ function initTerminal() {
   container.addEventListener('click', () => term && term.focus());
 
   requestAnimationFrame(() => {
-    if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
+    if (fitAddon) { try { fitAddon.fit(); } catch(e) { console.warn('[xterm] fit error:', e); } }
+    console.log('[xterm] Terminal open, rows=' + term.rows + ' cols=' + term.cols);
     term.focus();
     connectShell();
   });
@@ -491,7 +494,9 @@ function connectShell() {
   st.className = 'shell-status disconnected';
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  shellWs = new WebSocket(`${proto}//${location.host}/ws/shell/default`);
+  const wsUrl = `${proto}//${location.host}/ws/shell/default`;
+  console.log('[ws] connecting to:', wsUrl);
+  shellWs = new WebSocket(wsUrl);
   shellWs.binaryType = 'arraybuffer';
 
   shellWs.onopen = () => {
@@ -519,62 +524,8 @@ function connectShell() {
     // Binary frame — terminal data
     if (event.data instanceof ArrayBuffer) {
       const bytes = new Uint8Array(event.data);
-      // Decode to string for xterm.js (handles UTF-8 sequences correctly)
-      const text = new TextDecoder('utf-8', {fatal: false}).decode(bytes);
-      term.write(text);
-    }
-  };
-
-  shellWs.onerror = () => { st.textContent = T.shell_disconnected; st.className = 'shell-status disconnected'; };
-
-  shellWs.onclose = () => {
-    st.textContent = T.shell_disconnected;
-    st.className = 'shell-status disconnected';
-    _reconnectTimer = setTimeout(connectShell, 3000);
-  };
-}
-
-function sendResize() {
-  if (shellWs && shellWs.readyState === WebSocket.OPEN && term)
-    shellWs.send(JSON.stringify({ type:'resize', rows:term.rows, cols:term.cols }));
-}
-
-function reconnectShell() { connectShell(); }
-
-// ─── Resize handle ────────────────────────────────────────────────────────────
-function initResizeHandle() {
-  const handle = document.getElementById('resizeHandle');
-  const shell = document.getElementById('shellSection');
-  let sy = 0, sh = 0, drag = false;
-  handle.addEventListener('mousedown', e => { drag=true; sy=e.clientY; sh=shell.offsetHeight; document.body.style.userSelect='none'; });
-  document.addEventListener('mousemove', e => {
-    if (!drag) return;
-    const h = Math.max(150, Math.min(sh+(sy-e.clientY), window.innerHeight*0.7));
-    shell.style.height = h+'px'; shell.style.maxHeight='none';
-    if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
-    sendResize();
-  });
-  document.addEventListener('mouseup', () => { if(drag){ drag=false; document.body.style.userSelect=''; } });
-}
-
-window.addEventListener('resize', () => {
-  if (fitAddon) { try { fitAddon.fit(); } catch(e) {} }
-  sendResize();
-});
-
-// ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  const first = document.querySelector('.chat-item');
-  if (first) loadChat(first.id.replace('chat-item-',''));
-  initResizeHandle();
-  // Wait for xterm CDN to load
-  function tryInit(n) {
-    if (typeof Terminal !== 'undefined') { initTerminal(); }
-    else if (n > 0) { setTimeout(() => tryInit(n-1), 200); }
-    else { console.error('xterm.js failed to load'); }
-  }
-  tryInit(20);
-});
-</script>
-</body>
-</html>
+      console.log('[xterm] write', bytes.length, 'bytes');
+      // Debug: show raw bytes in DOM
+      const dbg = document.getElementById('wsDebug');
+      if (dbg) {
+        const preview = new TextDecoder('utf-8',{fatal:false}).decode(bytes).replace(/[
