@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from jinja2 import Environment as JinjaEnv
@@ -28,6 +28,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 templates = Jinja2Templates(directory="templates")
 storage = Storage(DATA_DIR)
 shell_manager = ShellManager(WORKSPACE_DIR)
+
+# In-memory task store: task_id -> {status, result, error}
+_tasks: dict = {}
 
 
 def get_locale(request: Request) -> str:
@@ -54,8 +57,7 @@ async def health():
 
 @app.get("/style.css")
 async def serve_css():
-    """Serve style.css - no auth needed (page is already auth-protected)."""
-    from fastapi.responses import Response
+    """Serve style.css from workspace (editable) or templates fallback."""
     workspace_css = WORKSPACE_DIR / "style.css"
     if workspace_css.exists():
         css = workspace_css.read_text(encoding="utf-8")
@@ -135,24 +137,55 @@ async def delete_chat(chat_id: str, _=Depends(basic_auth)):
 
 @app.post("/chats/{chat_id}/message")
 async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
+    """
+    Start Claude task and return task_id immediately.
+    Client polls /tasks/{task_id} to get result.
+    This prevents proxy timeout on long requests.
+    """
     body = await request.json()
     user_message = body.get("message", "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Empty message")
+
     messages = storage.load_chat(chat_id) or []
     messages.append({"role": "user", "content": user_message})
-    try:
-        reply, tool_uses = await handle_chat_message(
-            messages=messages,
-            workspace_dir=WORKSPACE_DIR,
-            shell_manager=shell_manager,
-            chat_id=chat_id,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    messages.append({"role": "assistant", "content": reply})
-    storage.save_chat(chat_id, messages)
-    return {"reply": reply, "tool_uses": tool_uses, "messages": messages}
+
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = {"status": "running"}
+
+    async def run():
+        try:
+            reply, tool_uses = await handle_chat_message(
+                messages=messages,
+                workspace_dir=WORKSPACE_DIR,
+                shell_manager=shell_manager,
+                chat_id=chat_id,
+            )
+            messages.append({"role": "assistant", "content": reply})
+            storage.save_chat(chat_id, messages)
+            _tasks[task_id] = {
+                "status": "done",
+                "reply": reply,
+                "tool_uses": tool_uses,
+                "messages": messages,
+            }
+        except Exception as e:
+            _tasks[task_id] = {"status": "error", "error": str(e)}
+
+    asyncio.create_task(run())
+    return {"task_id": task_id}
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(task_id: str, _=Depends(basic_auth)):
+    """Poll task status. Returns running/done/error."""
+    task = _tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    # Clean up completed tasks after reading
+    if task["status"] in ("done", "error"):
+        _tasks.pop(task_id, None)
+    return task
 
 
 @app.websocket("/ws/shell/{session_id}")
