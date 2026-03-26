@@ -43,6 +43,43 @@
         <div class="no-chats" id="noChats">{{ t.no_chats }}</div>
       {% endif %}
     </div>
+
+    <!-- Settings toggle -->
+    <div class="settings-toggle" id="settingsToggle" onclick="toggleSettings()">
+      <span>⚙</span> <span>{{ t.language }} / Settings</span>
+      <span class="arrow" style="margin-left:auto">▾</span>
+    </div>
+    <div class="settings-panel" id="settingsPanel">
+      <div class="settings-inner">
+        <div class="settings-row">
+          <div class="settings-label">Model</div>
+          <button class="settings-model-btn" id="modelBtn" onclick="openModelPicker()">
+            <span class="settings-model-name" id="modelBtnName">Loading...</span>
+            <span class="settings-model-cost" id="modelBtnCost"></span>
+          </button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-label">System context / Preferences</div>
+          <textarea class="settings-textarea" id="systemPromptInput"
+            placeholder="Describe yourself, your preferences, language, work context..."></textarea>
+        </div>
+        <button class="settings-save-btn" onclick="saveSettings()">Save settings</button>
+        <div class="settings-saved" id="settingsSaved"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model picker modal -->
+  <div class="modal-overlay" id="modelModal" style="display:none" onclick="if(event.target===this)closeModelPicker()">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title">Select Claude Model</span>
+        <button class="modal-close" onclick="closeModelPicker()">✕</button>
+      </div>
+      <div class="modal-body" id="modelModalBody">
+        <div style="padding:20px;text-align:center;color:var(--text3)">Loading models...</div>
+      </div>
+    </div>
   </div>
 
   <!-- Center: chat + terminal -->
@@ -194,6 +231,106 @@ function fmt(t){ if(!t)return ''; let s=esc(t); s=s.replace(/```([\s\S]*?)```/g,
 function esc(t){ if(typeof t!=='string')t=String(t||''); return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function onChatKeydown(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendMessage(); } }
 function autoResize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,130)+'px'; }
+
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+let currentModel = 'claude-sonnet-4-6';
+let modelsCache = null;
+
+const MODEL_COSTS = {
+  'claude-opus-4-6':           {i:5.00,  o:25.00},
+  'claude-sonnet-4-6':         {i:3.00,  o:15.00},
+  'claude-opus-4-5-20251101':  {i:5.00,  o:25.00},
+  'claude-sonnet-4-5-20250929':{i:3.00,  o:15.00},
+  'claude-haiku-4-5-20251001': {i:1.00,  o:5.00},
+  'claude-opus-4-1-20250805':  {i:15.00, o:75.00},
+  'claude-sonnet-4-20250514':  {i:3.00,  o:15.00},
+};
+
+async function loadSettings(){
+  try{
+    const r=await fetch('/settings'); if(!r.ok)return;
+    const d=await r.json();
+    if(d.model){ currentModel=d.model; updateModelBtn(d.model); }
+    if(d.system_prompt) document.getElementById('systemPromptInput').value=d.system_prompt;
+  }catch(e){}
+}
+
+function updateModelBtn(modelId){
+  const nameEl=document.getElementById('modelBtnName');
+  const costEl=document.getElementById('modelBtnCost');
+  const shortName = modelId.replace('claude-','').replace(/-20\d{6}/,'');
+  nameEl.textContent = modelId;
+  const c=MODEL_COSTS[modelId];
+  if(c) costEl.textContent=`$${c.i}/$${c.o}`;
+  else costEl.textContent='';
+}
+
+async function saveSettings(){
+  const model=currentModel;
+  const sp=document.getElementById('systemPromptInput').value.trim();
+  try{
+    const r=await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model,system_prompt:sp})});
+    const savedEl=document.getElementById('settingsSaved');
+    if(r.ok){ savedEl.textContent='Saved'; setTimeout(()=>savedEl.textContent='',2000); }
+    else{ savedEl.style.color='var(--error)'; savedEl.textContent='Error saving'; }
+  }catch(e){}
+}
+
+function toggleSettings(){
+  const panel=document.getElementById('settingsPanel');
+  const toggle=document.getElementById('settingsToggle');
+  const open=panel.classList.toggle('open');
+  toggle.classList.toggle('open',open);
+}
+
+async function openModelPicker(){
+  document.getElementById('modelModal').style.display='flex';
+  const body=document.getElementById('modelModalBody');
+  if(!modelsCache){
+    body.innerHTML='<div style="padding:20px;text-align:center;color:var(--text3)">Loading...</div>';
+    try{
+      const r=await fetch('/models'); modelsCache=await r.json();
+    }catch(e){ body.innerHTML='<div style="padding:16px;color:var(--error)">Failed to load models</div>'; return; }
+  }
+  renderModelList();
+}
+
+function renderModelList(){
+  const body=document.getElementById('modelModalBody');
+  body.innerHTML='';
+  for(const m of modelsCache){
+    const div=document.createElement('div');
+    div.className='model-option'+(m.id===currentModel?' selected':'');
+    div.onclick=()=>selectModel(m.id);
+    const badgeHtml=m.badge?`<span class="model-option-badge badge-${m.badge}">${m.badge}</span>`:'';
+    div.innerHTML=`
+      <div class="model-option-header">
+        <span class="model-option-name">${esc(m.id)}</span>
+        ${badgeHtml}
+      </div>
+      <div class="model-option-cost">
+        ${esc(m.name)} &nbsp;|&nbsp; Context: <span>${esc(m.ctx)}</span>
+        &nbsp;|&nbsp; In: <span>$${m.input}/1M</span>
+        &nbsp;&nbsp; Out: <span>$${m.output}/1M</span>
+      </div>`;
+    body.appendChild(div);
+  }
+}
+
+function selectModel(modelId){
+  currentModel=modelId;
+  updateModelBtn(modelId);
+  document.querySelectorAll('.model-option').forEach(el=>{
+    el.classList.toggle('selected', el.querySelector('.model-option-name').textContent===modelId);
+  });
+  closeModelPicker();
+  saveSettings();
+}
+
+function closeModelPicker(){
+  document.getElementById('modelModal').style.display='none';
+}
 
 // ── File Manager ──────────────────────────────────────────────────────────────
 let currentFilePath = '';
@@ -416,6 +553,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   initTerminal();
   navigateTo('');
   initFileDrop();
+  loadSettings();
 });
 </script>
 </body>
