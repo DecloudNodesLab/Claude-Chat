@@ -94,13 +94,12 @@ class ShellSession:
         self.write(command.encode("utf-8", errors="replace"))
 
     def inject_claude_command(self, command: str):
-        """Inject Claude's command into PTY with green highlight."""""
-        # ESC[32m = green, ESC[1m = bold, ESC[0m = reset
-        GREEN  = "\x1b[1;32m"
-        RESET  = "\x1b[0m"
-        # Print highlighted label on its own line, then run command normally
-        banner = f"\r\n{GREEN}> [Claude] {command}{RESET}\r\n"
-        self.write(banner.encode("utf-8", errors="replace"))
+        """Inject Claude command into PTY using echo for clean green label."""
+        # Use echo -e with ANSI inside a shell command — clean, no PTY escape issues
+        safe = command.replace("'", "'\''")
+        # Print colored label via echo, then run the actual command
+        full = f"echo -e '\033[1;32m> [Claude] {safe}\033[0m' ; {command}\n"
+        self.write(full.encode("utf-8", errors="replace"))
 
     def stop(self):
         self._running = False
