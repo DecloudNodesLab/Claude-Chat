@@ -115,7 +115,6 @@ def read_file_tool(workspace_dir: Path, path: str) -> str:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
         text = f"[Binary file, {len(content)} bytes]"
-    # Limit output size
     if len(text) > 32000:
         text = text[:32000] + f"\n... [truncated, total {len(content)} bytes]"
     return text
@@ -155,6 +154,7 @@ def list_files_tool(workspace_dir: Path, path: str = "") -> str:
 
 def delete_path_tool(workspace_dir: Path, path: str) -> str:
     import shutil
+
     target = _safe_path(workspace_dir, path)
     if not target.exists():
         raise FileNotFoundError(f"Path not found: {path}")
@@ -166,6 +166,24 @@ def delete_path_tool(workspace_dir: Path, path: str) -> str:
         shutil.rmtree(target)
         return f"Deleted directory: {rel}"
     return f"Deleted: {rel}"
+
+
+async def run_command(workspace_dir: Path, shell_manager, command: str, timeout: float = 30) -> str:
+    timeout = min(max(float(timeout), 1), 120)
+
+    result = await shell_manager.run_command_in_session(
+        command=command,
+        session_id="default",
+        timeout=timeout,
+    )
+
+    output_parts = []
+    if result.get("stdout"):
+        output_parts.append(f"STDOUT:\n{result['stdout']}")
+    if result.get("stderr"):
+        output_parts.append(f"STDERR:\n{result['stderr']}")
+    output_parts.append(f"EXIT CODE: {result['returncode']}")
+    return "\n".join(output_parts)
 
 
 async def execute_tool(
@@ -188,22 +206,12 @@ async def execute_tool(
         return list_files_tool(workspace_dir, tool_input.get("path", ""))
 
     elif tool_name == "run_command":
-        command = tool_input.get("command", "")
-        timeout = float(tool_input.get("timeout", 30))
-        timeout = min(max(timeout, 1), 120)
-
-        result = await shell_manager.run_command_in_session(
-            command=command,
-            session_id="default",
-            timeout=timeout,
+        return await run_command(
+            workspace_dir=workspace_dir,
+            shell_manager=shell_manager,
+            command=tool_input.get("command", ""),
+            timeout=float(tool_input.get("timeout", 30)),
         )
-        output_parts = []
-        if result["stdout"]:
-            output_parts.append(f"STDOUT:\n{result['stdout']}")
-        if result["stderr"]:
-            output_parts.append(f"STDERR:\n{result['stderr']}")
-        output_parts.append(f"EXIT CODE: {result['returncode']}")
-        return "\n".join(output_parts)
 
     elif tool_name == "delete_path":
         return delete_path_tool(workspace_dir, tool_input.get("path", ""))
