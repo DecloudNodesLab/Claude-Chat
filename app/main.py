@@ -7,7 +7,6 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -96,7 +95,6 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     dest = WORKSPACE_DIR / filename
-    # Prevent path traversal
     dest = dest.resolve()
     if not str(dest).startswith(str(WORKSPACE_DIR.resolve())):
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -167,13 +165,15 @@ async def send_message(chat_id: str, request: Request, _=Depends(basic_auth)):
 
 @app.websocket("/ws/shell/{session_id}")
 async def shell_websocket(websocket: WebSocket, session_id: str):
-    # Basic auth via query param token for WS
+    # WebSocket не поддерживает Basic Auth из браузера.
+    # Страница защищена Basic Auth, поэтому WS доступен только авторизованным.
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_") or "default"
     await websocket.accept()
     try:
-        await shell_manager.handle_websocket(websocket, session_id)
+        await shell_manager.handle_websocket(websocket, safe_id)
     except WebSocketDisconnect:
         pass
-    except Exception as e:
+    except Exception:
         try:
             await websocket.close()
         except Exception:

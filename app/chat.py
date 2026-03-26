@@ -29,17 +29,11 @@ async def handle_chat_message(
     shell_manager,
     chat_id: str,
 ) -> Tuple[str, List[Dict]]:
-    """
-    Send messages to Claude, handle tool calls in a loop, return final reply and tool_uses log.
-    """
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY is not set")
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-    # Convert stored messages to Anthropic format
     api_messages = _convert_messages(messages)
-
     tool_uses_log = []
     max_iterations = 10
 
@@ -52,7 +46,6 @@ async def handle_chat_message(
             messages=api_messages,
         )
 
-        # Collect text and tool use blocks
         text_content = ""
         tool_use_blocks = []
 
@@ -62,17 +55,11 @@ async def handle_chat_message(
             elif block.type == "tool_use":
                 tool_use_blocks.append(block)
 
-        # If no tool calls or stop_reason is end_turn, we're done
         if response.stop_reason == "end_turn" or not tool_use_blocks:
             return text_content, tool_uses_log
 
-        # Add assistant message with all content blocks to api_messages
-        api_messages.append({
-            "role": "assistant",
-            "content": response.content,
-        })
+        api_messages.append({"role": "assistant", "content": response.content})
 
-        # Process tool calls
         tool_results = []
         for tool_block in tool_use_blocks:
             tool_name = tool_block.name
@@ -112,18 +99,12 @@ async def handle_chat_message(
                     "is_error": True,
                 })
 
-        # Add tool results to conversation
-        api_messages.append({
-            "role": "user",
-            "content": tool_results,
-        })
+        api_messages.append({"role": "user", "content": tool_results})
 
-    # If we hit max iterations, return what we have
     return "I've completed the requested operations. Please let me know if you need anything else.", tool_uses_log
 
 
 def _convert_messages(messages: List[Dict]) -> List[Dict]:
-    """Convert stored simple messages to Anthropic API format."""
     result = []
     for msg in messages:
         role = msg.get("role")
